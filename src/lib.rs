@@ -73,11 +73,11 @@ struct WordTree {
 }
 
 struct SyllableItem {
-    chars: Vec<u8>,
+    chars: Bytes,
 }
 
 struct CompoundRules {
-    rules: Vec<Vec<u8>>,
+    rules: Vec<Bytes>,
     start_flags: Vec<u8>,
     all_flags: Vec<u8>,
 }
@@ -103,24 +103,24 @@ impl CompoundRules {
         self.all_flags.contains(&flag)
     }
 
-    fn matches_partial(&self, flags: &[u8]) -> bool {
+    fn matches_partial(&self, arena: &Arena, flags: &[u8]) -> bool {
         if self.rules.is_empty() {
             return false;
         }
         for rule in &self.rules {
-            if self.rule_matches_partial(rule, flags) {
+            if self.rule_matches_partial(&arena[*rule], flags) {
                 return true;
             }
         }
         false
     }
 
-    fn matches_complete(&self, flags: &[u8]) -> bool {
+    fn matches_complete(&self, arena: &Arena, flags: &[u8]) -> bool {
         if self.rules.is_empty() {
             return false;
         }
         for rule in &self.rules {
-            if self.rule_matches_complete(rule, flags) {
+            if self.rule_matches_complete(&arena[*rule], flags) {
                 return true;
             }
         }
@@ -227,23 +227,24 @@ impl CompoundRules {
 }
 
 struct Syllable {
-    chars: Vec<u8>,
+    chars: Bytes,
     items: Vec<SyllableItem>,
 }
 
 impl Syllable {
     fn new() -> Self {
         Self {
-            chars: Vec::new(),
+            chars: Bytes::default(),
             items: Vec::new(),
         }
     }
 
-    fn count(&self, word: &[u8]) -> usize {
+    fn count(&self, arena: &Arena, word: &[u8]) -> usize {
         if self.chars.is_empty() && self.items.is_empty() {
             return 0;
         }
 
+        let chars = &arena[self.chars];
         let mut cnt = 0;
         let mut skip = false;
         let mut pos = 0;
@@ -257,8 +258,9 @@ impl Syllable {
 
             let mut matched_len = 0;
             for item in &self.items {
-                if item.chars.len() > matched_len && word[pos..].starts_with(&item.chars) {
-                    matched_len = item.chars.len();
+                let item_chars = &arena[item.chars];
+                if item_chars.len() > matched_len && word[pos..].starts_with(item_chars) {
+                    matched_len = item_chars.len();
                 }
             }
 
@@ -268,7 +270,7 @@ impl Syllable {
                 pos += matched_len;
             } else {
                 let c = word[pos];
-                if !self.chars.contains(&c) {
+                if !chars.contains(&c) {
                     skip = false;
                 } else if !skip {
                     cnt += 1;
@@ -332,8 +334,45 @@ impl CharFlags {
     }
 }
 
+#[derive(Default)]
+struct Arena {
+    data: Vec<u8>,
+}
+
+impl Arena {
+    pub fn alloc(&mut self, bytes: &[u8]) -> Bytes {
+        let start = self.data.len() as u32;
+        let len = bytes.len() as u32;
+        self.data.extend_from_slice(bytes);
+        Bytes { start, len }
+    }
+}
+
+impl std::ops::Index<Bytes> for Arena {
+    type Output = [u8];
+
+    fn index(&self, index: Bytes) -> &Self::Output {
+        let start = index.start as usize;
+        let end = start + index.len as usize;
+        &self.data[start..end]
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Bytes {
+    start: u32,
+    len: u32,
+}
+
+impl Bytes {
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// A loaded spell dictionary.
 pub struct Dictionary {
+    arena: Arena,
     foldtree: WordTree,
     keeptree: WordTree,
     #[allow(dead_code)]
@@ -342,16 +381,16 @@ pub struct Dictionary {
     #[allow(dead_code)]
     regions: Vec<[u8; 2]>,
     #[allow(dead_code)]
-    midword: Vec<u8>,
+    midword: Bytes,
     #[allow(dead_code)]
-    prefcond: Vec<Vec<u8>>,
+    prefcond: Vec<Bytes>,
     comp_max: u8,
     comp_minlen: u8,
     comp_sylmax: u8,
     #[allow(dead_code)]
     comp_options: u8,
     comp_rules: CompoundRules,
-    comp_patterns: Vec<(Vec<u8>, Vec<u8>)>,
+    comp_patterns: Vec<(Bytes, Bytes)>,
     syllable: Syllable,
     #[allow(dead_code)]
     nobreak: bool,
@@ -666,13 +705,13 @@ impl Dictionary {
                 if word_ends {
                     if !self
                         .comp_rules
-                        .matches_complete(&comp_flags[..comp_len + 1])
+                        .matches_complete(&self.arena, &comp_flags[..comp_len + 1])
                     {
                         continue;
                     }
 
                     if self.comp_sylmax < MAXWLEN as u8 {
-                        let syl_count = self.syllable.count(word);
+                        let syl_count = self.syllable.count(&self.arena, word);
                         if syl_count > self.comp_sylmax as usize {
                             if comp_len + 1 >= self.comp_max as usize {
                                 continue;
@@ -683,7 +722,7 @@ impl Dictionary {
                     return true;
                 }
 
-                if !self.comp_rules.matches_partial(&comp_flags[..comp_len + 1]) {
+                if !self.comp_rules.matches_partial(&self.arena, &comp_flags[..comp_len + 1]) {
                     continue;
                 }
 
@@ -708,16 +747,18 @@ impl Dictionary {
     }
 
     fn check_compound_pattern(&self, word: &[u8], split_pos: usize) -> bool {
-        for (first, second) in &self.comp_patterns {
-            if first.len() > split_pos {
+        for &(first, second) in &self.comp_patterns {
+            let first_bytes = &self.arena[first];
+            let second_bytes = &self.arena[second];
+            if first_bytes.len() > split_pos {
                 continue;
             }
-            let end_of_first = &word[split_pos - first.len()..split_pos];
-            if end_of_first != first.as_slice() {
+            let end_of_first = &word[split_pos - first_bytes.len()..split_pos];
+            if end_of_first != first_bytes {
                 continue;
             }
             let start_of_second = &word[split_pos..];
-            if start_of_second.starts_with(second) {
+            if start_of_second.starts_with(second_bytes) {
                 return true;
             }
         }
@@ -1060,8 +1101,9 @@ mod tests {
 
     #[test]
     fn test_compound_rules_simple() {
+        let mut arena = Arena::default();
         let mut rules = CompoundRules::new();
-        rules.rules.push(b"abc".to_vec());
+        rules.rules.push(arena.alloc(b"abc"));
         rules.start_flags.push(b'a');
         rules.all_flags.extend_from_slice(&[b'a', b'b', b'c']);
 
@@ -1071,85 +1113,91 @@ mod tests {
         assert!(rules.flag_allowed(b'b'));
         assert!(rules.flag_allowed(b'c'));
 
-        assert!(rules.matches_partial(&[b'a']));
-        assert!(rules.matches_partial(&[b'a', b'b']));
-        assert!(rules.matches_partial(&[b'a', b'b', b'c']));
-        assert!(!rules.matches_partial(&[b'x']));
+        assert!(rules.matches_partial(&arena, &[b'a']));
+        assert!(rules.matches_partial(&arena, &[b'a', b'b']));
+        assert!(rules.matches_partial(&arena, &[b'a', b'b', b'c']));
+        assert!(!rules.matches_partial(&arena, &[b'x']));
 
-        assert!(rules.matches_complete(&[b'a', b'b', b'c']));
-        assert!(!rules.matches_complete(&[b'a', b'b']));
-        assert!(!rules.matches_complete(&[b'a', b'b', b'c', b'd']));
+        assert!(rules.matches_complete(&arena, &[b'a', b'b', b'c']));
+        assert!(!rules.matches_complete(&arena, &[b'a', b'b']));
+        assert!(!rules.matches_complete(&arena, &[b'a', b'b', b'c', b'd']));
     }
 
     #[test]
     fn test_compound_rules_with_brackets() {
+        let mut arena = Arena::default();
         let mut rules = CompoundRules::new();
-        rules.rules.push(b"[ab]c".to_vec());
+        rules.rules.push(arena.alloc(b"[ab]c"));
         rules.start_flags.extend_from_slice(&[b'a', b'b']);
         rules.all_flags.extend_from_slice(&[b'a', b'b', b'c']);
 
-        assert!(rules.matches_partial(&[b'a']));
-        assert!(rules.matches_partial(&[b'b']));
-        assert!(rules.matches_partial(&[b'a', b'c']));
-        assert!(rules.matches_partial(&[b'b', b'c']));
+        assert!(rules.matches_partial(&arena, &[b'a']));
+        assert!(rules.matches_partial(&arena, &[b'b']));
+        assert!(rules.matches_partial(&arena, &[b'a', b'c']));
+        assert!(rules.matches_partial(&arena, &[b'b', b'c']));
 
-        assert!(rules.matches_complete(&[b'a', b'c']));
-        assert!(rules.matches_complete(&[b'b', b'c']));
-        assert!(!rules.matches_complete(&[b'a']));
-        assert!(!rules.matches_complete(&[b'c', b'a']));
+        assert!(rules.matches_complete(&arena, &[b'a', b'c']));
+        assert!(rules.matches_complete(&arena, &[b'b', b'c']));
+        assert!(!rules.matches_complete(&arena, &[b'a']));
+        assert!(!rules.matches_complete(&arena, &[b'c', b'a']));
     }
 
     #[test]
     fn test_compound_rules_with_plus() {
+        let mut arena = Arena::default();
         let mut rules = CompoundRules::new();
-        rules.rules.push(b"a+b".to_vec());
+        rules.rules.push(arena.alloc(b"a+b"));
         rules.start_flags.push(b'a');
         rules.all_flags.extend_from_slice(&[b'a', b'b']);
 
-        assert!(rules.matches_complete(&[b'a', b'b']));
-        assert!(!rules.matches_complete(&[b'b']));
+        assert!(rules.matches_complete(&arena, &[b'a', b'b']));
+        assert!(!rules.matches_complete(&arena, &[b'b']));
     }
 
     #[test]
     fn test_compound_rules_multiple() {
+        let mut arena = Arena::default();
         let mut rules = CompoundRules::new();
-        rules.rules.push(b"ab".to_vec());
-        rules.rules.push(b"cd".to_vec());
+        rules.rules.push(arena.alloc(b"ab"));
+        rules.rules.push(arena.alloc(b"cd"));
         rules.start_flags.extend_from_slice(&[b'a', b'c']);
         rules.all_flags.extend_from_slice(&[b'a', b'b', b'c', b'd']);
 
-        assert!(rules.matches_complete(&[b'a', b'b']));
-        assert!(rules.matches_complete(&[b'c', b'd']));
-        assert!(!rules.matches_complete(&[b'a', b'd']));
+        assert!(rules.matches_complete(&arena, &[b'a', b'b']));
+        assert!(rules.matches_complete(&arena, &[b'c', b'd']));
+        assert!(!rules.matches_complete(&arena, &[b'a', b'd']));
     }
 
     #[test]
     fn test_syllable_counting_simple() {
+        let mut arena = Arena::default();
         let mut syl = Syllable::new();
-        syl.chars = b"aeiou".to_vec();
+        syl.chars = arena.alloc(b"aeiou");
 
-        assert_eq!(syl.count(b"hello"), 2);
-        assert_eq!(syl.count(b"beautiful"), 3);
-        assert_eq!(syl.count(b"xyz"), 0);
+        assert_eq!(syl.count(&arena, b"hello"), 2);
+        assert_eq!(syl.count(&arena, b"beautiful"), 3);
+        assert_eq!(syl.count(&arena, b"xyz"), 0);
     }
 
     #[test]
     fn test_syllable_counting_with_items() {
+        let mut arena = Arena::default();
         let mut syl = Syllable::new();
-        syl.chars = b"aeiou".to_vec();
+        syl.chars = arena.alloc(b"aeiou");
         syl.items.push(SyllableItem {
-            chars: b"ou".to_vec(),
+            chars: arena.alloc(b"ou"),
         });
 
-        assert_eq!(syl.count(b"sound"), 1);
+        assert_eq!(syl.count(&arena, b"sound"), 1);
     }
 
     #[test]
     fn test_syllable_counting_space_reset() {
+        let mut arena = Arena::default();
         let mut syl = Syllable::new();
-        syl.chars = b"aeiou".to_vec();
+        syl.chars = arena.alloc(b"aeiou");
 
-        assert_eq!(syl.count(b"he lo"), 1);
+        assert_eq!(syl.count(&arena, b"he lo"), 1);
     }
 
     #[test]

@@ -93,6 +93,7 @@ impl<'a> SpellReader<'a> {
 /// Parse a spell dictionary from .spl file contents.
 pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let mut r = SpellReader::new(contents);
+    let mut a = Arena::default();
 
     let magic = r.read_exact(8)?;
     if magic != VIMSPELLMAGIC {
@@ -106,7 +107,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
 
     let mut charflags = CharFlags::new();
     let mut regions = Vec::new();
-    let mut midword = Vec::new();
+    let mut midword = Bytes::default();
     let mut prefcond = Vec::new();
     let mut comp_max = MAXWLEN as u8;
     let mut comp_minlen = 0u8;
@@ -137,14 +138,16 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
                 read_charflags(&mut r, len, &mut charflags)?;
             }
             SN_MIDWORD => {
-                midword = r.read_exact(len)?.to_vec();
+                let data = r.read_exact(len)?;
+                midword = a.alloc(data);
             }
             SN_PREFCOND => {
-                prefcond = read_prefcond(&mut r, len)?;
+                prefcond = read_prefcond(&mut r, &mut a, len)?;
             }
             SN_COMPOUND => {
                 read_compound(
                     &mut r,
+                    &mut a,
                     len,
                     &mut comp_max,
                     &mut comp_minlen,
@@ -155,7 +158,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
                 )?;
             }
             SN_SYLLABLE => {
-                read_syllable(&mut r, len, &mut syllable)?;
+                read_syllable(&mut r, &mut a, len, &mut syllable)?;
             }
             SN_NOBREAK => {
                 nobreak = true;
@@ -175,6 +178,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let prefixtree = read_wordtree(&mut r)?;
 
     Ok(Dictionary {
+        arena: a,
         foldtree,
         keeptree,
         prefixtree,
@@ -256,7 +260,7 @@ fn read_charflags(r: &mut SpellReader, len: usize, cf: &mut CharFlags) -> Result
     Ok(())
 }
 
-fn read_prefcond(r: &mut SpellReader, len: usize) -> Result<Vec<Vec<u8>>, ParseError> {
+fn read_prefcond(r: &mut SpellReader, a: &mut Arena, len: usize) -> Result<Vec<Bytes>, ParseError> {
     if len < 2 {
         r.skip(len)?;
         return Ok(Vec::new());
@@ -276,9 +280,9 @@ fn read_prefcond(r: &mut SpellReader, len: usize) -> Result<Vec<Vec<u8>>, ParseE
         let cond = if cond_len > 0 {
             let data = r.read_exact(cond_len)?;
             bytes_read += cond_len;
-            data.to_vec()
+            a.alloc(data)
         } else {
-            Vec::new()
+            Bytes::default()
         };
         conditions.push(cond);
     }
@@ -294,13 +298,14 @@ fn read_prefcond(r: &mut SpellReader, len: usize) -> Result<Vec<Vec<u8>>, ParseE
 #[allow(clippy::too_many_arguments)]
 fn read_compound(
     r: &mut SpellReader,
+    a: &mut Arena,
     len: usize,
     comp_max: &mut u8,
     comp_minlen: &mut u8,
     comp_sylmax: &mut u8,
     comp_options: &mut u8,
     comp_rules: &mut CompoundRules,
-    comp_patterns: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    comp_patterns: &mut Vec<(Bytes, Bytes)>,
 ) -> Result<(), ParseError> {
     if len < 2 {
         r.skip(len)?;
@@ -361,13 +366,15 @@ fn read_compound(
                 r.skip(todo)?;
                 return Ok(());
             }
-            let pat = r.read_exact(pat_len)?.to_vec();
+            let pat = r.read_exact(pat_len)?;
             todo -= pat_len;
 
-            let mut parts = pat.splitn(2, |&b| b == b'/');
-            let first_part = parts.next().unwrap_or(&[]).to_vec();
-            let second_part = parts.next().unwrap_or(&[]).to_vec();
-            comp_patterns.push((first_part, second_part));
+            let split_pos = pat.iter().position(|&b| b == b'/');
+            let (first_part, second_part) = match split_pos {
+                Some(pos) => (&pat[..pos], &pat[pos + 1..]),
+                None => (pat, &[][..]),
+            };
+            comp_patterns.push((a.alloc(first_part), a.alloc(second_part)));
         }
     }
 
@@ -411,8 +418,8 @@ fn read_compound(
             }
             b'/' => {
                 if !current_rule.is_empty() {
-                    comp_rules.rules.push(current_rule);
-                    current_rule = Vec::new();
+                    comp_rules.rules.push(a.alloc(&current_rule));
+                    current_rule.clear();
                 }
                 at_start = true;
             }
@@ -423,7 +430,7 @@ fn read_compound(
     }
 
     if !current_rule.is_empty() {
-        comp_rules.rules.push(current_rule);
+        comp_rules.rules.push(a.alloc(&current_rule));
     }
 
     Ok(())
@@ -431,6 +438,7 @@ fn read_compound(
 
 fn read_syllable(
     r: &mut SpellReader,
+    a: &mut Arena,
     len: usize,
     syllable: &mut Syllable,
 ) -> Result<(), ParseError> {
@@ -442,13 +450,13 @@ fn read_syllable(
     let mut parts = data.split(|&b| b == b'/');
 
     if let Some(chars) = parts.next() {
-        syllable.chars = chars.to_vec();
+        syllable.chars = a.alloc(chars);
     }
 
     for part in parts {
         if !part.is_empty() {
             syllable.items.push(SyllableItem {
-                chars: part.to_vec(),
+                chars: a.alloc(part),
             });
         }
     }
