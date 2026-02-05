@@ -28,7 +28,6 @@ const WF_AFX: u8 = 0x20;
 const WF_FIXCAP: u8 = 0x40;
 const WF_KEEPCAP: u8 = 0x80;
 
-#[allow(dead_code)]
 const WF_HAS_AFF: u16 = 0x0100;
 const WF_NEEDCOMP: u16 = 0x0200;
 #[allow(dead_code)]
@@ -36,6 +35,11 @@ const WF_NOSUGGEST: u16 = 0x0400;
 const WF_COMPROOT: u16 = 0x0800;
 const WF_NOCOMPBEF: u16 = 0x1000;
 const WF_NOCOMPAFT: u16 = 0x2000;
+
+const WFP_RARE: u32 = 0x01;
+const WFP_NC: u32 = 0x02;
+const WF_RAREPFX: u32 = WFP_RARE << 24;
+const WF_PFX_NC: u32 = WFP_NC << 24;
 
 #[allow(dead_code)]
 const COMP_CHECKDUP: u8 = 1;
@@ -370,19 +374,63 @@ impl Bytes {
     }
 }
 
+fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
+    let mut ci = 0usize;
+    let mut wi = 0usize;
+
+    while ci < cond.len() {
+        if wi >= word.len() {
+            return false;
+        }
+
+        match cond[ci] {
+            b'[' => {
+                ci += 1;
+                let negated = ci < cond.len() && cond[ci] == b'^';
+                if negated {
+                    ci += 1;
+                }
+                let mut matched = false;
+                while ci < cond.len() && cond[ci] != b']' {
+                    if cond[ci] == word[wi] {
+                        matched = true;
+                    }
+                    ci += 1;
+                }
+                if ci < cond.len() {
+                    ci += 1;
+                }
+                if negated == matched {
+                    return false;
+                }
+            }
+            b'.' => {
+                ci += 1;
+            }
+            c => {
+                if c != word[wi] {
+                    return false;
+                }
+                ci += 1;
+            }
+        }
+        wi += 1;
+    }
+
+    true
+}
+
 /// A loaded spell dictionary.
 pub struct Dictionary {
     arena: Arena,
     foldtree: WordTree,
     keeptree: WordTree,
-    #[allow(dead_code)]
     prefixtree: WordTree,
     charflags: CharFlags,
     #[allow(dead_code)]
     regions: Vec<[u8; 2]>,
     #[allow(dead_code)]
     midword: Bytes,
-    #[allow(dead_code)]
     prefcond: Vec<Bytes>,
     comp_max: u8,
     comp_minlen: u8,
@@ -583,6 +631,10 @@ impl Dictionary {
 
         let flags_count = self.find_word(&self.foldtree, folded, &mut flags_buf);
         if flags_count == 0 {
+            let prefix_result = self.find_prefix(folded);
+            if prefix_result != WordResult::NotFound {
+                return prefix_result;
+            }
             if !self.comp_rules.is_empty() {
                 return self.check_compound(word, folded);
             }
@@ -615,6 +667,11 @@ impl Dictionary {
             }
 
             return WordResult::Valid;
+        }
+
+        let prefix_result = self.find_prefix(folded);
+        if prefix_result != WordResult::NotFound {
+            return prefix_result;
         }
 
         if !self.comp_rules.is_empty() {
@@ -854,6 +911,156 @@ impl Dictionary {
         }
 
         result_count
+    }
+
+    fn find_prefix(&self, folded: &[u8]) -> WordResult {
+        if self.prefixtree.is_empty() || folded.is_empty() {
+            return WordResult::NotFound;
+        }
+
+        let byts = &self.prefixtree.byts;
+        let idxs = &self.prefixtree.idxs;
+
+        let mut arridx = 0usize;
+        let mut wlen = 0usize;
+
+        loop {
+            let Some(&len_byte) = byts.get(arridx) else {
+                break;
+            };
+            let mut len = len_byte as usize;
+            arridx += 1;
+
+            if let Some(&b) = byts.get(arridx) {
+                if b == 0 {
+                    let pref_arridx = arridx;
+                    let mut pref_count = 0usize;
+                    while pref_count < len {
+                        let Some(&pb) = byts.get(arridx + pref_count) else {
+                            break;
+                        };
+                        if pb != 0 {
+                            break;
+                        }
+                        pref_count += 1;
+                    }
+
+                    if wlen > 0 && wlen < folded.len() {
+                        let result = self.check_prefix_at(folded, wlen, pref_arridx, pref_count);
+                        if result != WordResult::NotFound {
+                            return result;
+                        }
+                    }
+
+                    arridx += pref_count;
+                    len -= pref_count;
+
+                    if len == 0 {
+                        break;
+                    }
+                }
+            }
+
+            if wlen >= folded.len() {
+                break;
+            }
+
+            let search_byte = folded[wlen];
+            let search_end = arridx + len;
+
+            let mut lo = arridx;
+            let mut hi = search_end;
+            let mut found = false;
+
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let Some(&mid_byte) = byts.get(mid) else {
+                    break;
+                };
+                if mid_byte == search_byte {
+                    let next = idxs[mid] as usize;
+                    if next == 0 {
+                        return WordResult::NotFound;
+                    }
+                    arridx = next;
+                    found = true;
+                    break;
+                } else if mid_byte < search_byte {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            if !found {
+                break;
+            }
+
+            wlen += 1;
+        }
+
+        WordResult::NotFound
+    }
+
+    fn check_prefix_at(
+        &self,
+        folded: &[u8],
+        prefix_len: usize,
+        pref_arridx: usize,
+        pref_count: usize,
+    ) -> WordResult {
+        let remainder = &folded[prefix_len..];
+        let mut flags_buf = [0u32; MAXWLEN];
+        let flags_count = self.find_word(&self.foldtree, remainder, &mut flags_buf);
+
+        for fi in 0..flags_count {
+            let word_flags = flags_buf[fi];
+
+            if word_flags & (WF_BANNED as u32) != 0 {
+                continue;
+            }
+            if word_flags & (WF_NEEDCOMP as u32) != 0 {
+                continue;
+            }
+
+            let word_affix_id = if word_flags & (WF_AFX as u32) != 0 {
+                (word_flags >> 24) as u8
+            } else {
+                continue;
+            };
+
+            for pi in 0..pref_count {
+                let pidx = self.prefixtree.idxs[pref_arridx + pi];
+                let prefix_affix_id = (pidx & 0xFF) as u8;
+
+                if word_affix_id != prefix_affix_id {
+                    continue;
+                }
+
+                if (word_flags & (WF_HAS_AFF as u32) != 0) && (pidx & WF_PFX_NC != 0) {
+                    continue;
+                }
+
+                let condnr = ((pidx >> 8) & 0xFFFF) as usize;
+                if condnr < self.prefcond.len() {
+                    let cond_bytes = self.prefcond[condnr];
+                    if !cond_bytes.is_empty()
+                        && !match_prefix_condition(&self.arena[cond_bytes], remainder)
+                    {
+                        continue;
+                    }
+                }
+
+                let is_rare =
+                    (pidx & WF_RAREPFX != 0) || (word_flags & (WF_RARE as u32) != 0);
+                if is_rare {
+                    return WordResult::ValidRare;
+                }
+                return WordResult::Valid;
+            }
+        }
+
+        WordResult::NotFound
     }
 
     /// Returns true if compound word support is enabled for this dictionary.
@@ -1207,5 +1414,259 @@ mod tests {
 
         assert_eq!(info.max_words, 254);
         assert_eq!(info.min_part_len, 0);
+    }
+
+    #[test]
+    fn test_prefix_words_in_foldtree() {
+        let dict = load_dict();
+        assert!(dict.check_word(b"undo"));
+        assert!(dict.check_word(b"unkind"));
+        assert!(dict.check_word(b"unable"));
+        assert!(dict.check_word(b"unlike"));
+        assert!(dict.check_word(b"rewrite"));
+        assert!(dict.check_word(b"reopen"));
+        assert!(dict.check_word(b"unhappy"));
+        assert!(dict.check_word(b"restart"));
+    }
+
+    #[test]
+    fn test_prefix_invalid_combos() {
+        let dict = load_dict();
+        assert!(!dict.check_word(b"unxyzabc"));
+        assert!(!dict.check_word(b"rexyzabc"));
+    }
+
+    fn build_prefix_dict() -> Dictionary {
+        // Manually construct a Dictionary with a synthetic prefix tree
+        // to test the prefix matching logic.
+        //
+        // Word tree contains "happy" with WF_AFX set and affix ID = 5.
+        // Prefix tree contains "un" with affix ID = 5 and no condition.
+        // So "unhappy" should be valid via prefix stripping.
+        let arena = Arena::default();
+
+        // Build foldtree containing "happy" with flags: WF_AFX | affix_id=5 in bits 24-31
+        // The trie for "happy": root -> h -> a -> p -> p -> y -> [end with flags]
+        //
+        // Trie layout: each node starts with a sibling count byte, then sibling entries.
+        // A sibling with byte 0 and flags in idxs is an end-of-word marker.
+        // A sibling with byte > 3 and child index in idxs is a character node.
+        //
+        // We encode: h-a-p-p-y with flags at the leaf.
+        let word_flags: u32 = (WF_AFX as u32) | (5u32 << 24);
+
+        // Node layout for "happy":
+        // [0] = 1 (1 sibling: 'h')
+        // [1] = 'h', idxs[1] = 2 (child at index 2)
+        // [2] = 1 (1 sibling: 'a')
+        // [3] = 'a', idxs[3] = 4
+        // [4] = 1 (1 sibling: 'p')
+        // [5] = 'p', idxs[5] = 6
+        // [6] = 1 (1 sibling: 'p')
+        // [7] = 'p', idxs[7] = 8
+        // [8] = 1 (1 sibling: 'y')
+        // [9] = 'y', idxs[9] = 10
+        // [10] = 1 (1 sibling: end-of-word marker)
+        // [11] = 0 (end marker), idxs[11] = word_flags
+        let foldtree = WordTree {
+            byts: vec![1, b'h', 1, b'a', 1, b'p', 1, b'p', 1, b'y', 1, 0],
+            idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, word_flags],
+        };
+
+        // Build prefix tree containing "un" with affix_id=5, condnr=0, pflags=0
+        // idxs value = (pflags << 24) | (condnr << 8) | affix_id = 0 | 0 | 5 = 5
+        // Node layout for "un":
+        // [0] = 1 (1 sibling: 'u')
+        // [1] = 'u', idxs[1] = 2
+        // [2] = 1 (1 sibling: 'n')
+        // [3] = 'n', idxs[3] = 4
+        // [4] = 1 (1 sibling: end-of-prefix marker)
+        // [5] = 0 (end marker), idxs[5] = 5 (affix_id=5, condnr=0, pflags=0)
+        let prefix_pidx: u32 = 5; // affix_id=5
+        let prefixtree = WordTree {
+            byts: vec![1, b'u', 1, b'n', 1, 0],
+            idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
+        };
+
+        // Empty condition (index 0) - always matches
+        let prefcond = vec![Bytes::default()];
+
+        Dictionary {
+            arena,
+            foldtree,
+            keeptree: WordTree::new(),
+            prefixtree,
+            charflags: CharFlags::new(),
+            regions: Vec::new(),
+            midword: Bytes::default(),
+            prefcond,
+            comp_max: MAXWLEN as u8,
+            comp_minlen: 0,
+            comp_sylmax: MAXWLEN as u8,
+            comp_options: 0,
+            comp_rules: CompoundRules::new(),
+            comp_patterns: Vec::new(),
+            syllable: Syllable::new(),
+            nobreak: false,
+        }
+    }
+
+    #[test]
+    fn test_prefix_synthetic_valid() {
+        let dict = build_prefix_dict();
+        assert!(dict.check_word(b"unhappy"));
+    }
+
+    #[test]
+    fn test_prefix_synthetic_root_valid() {
+        let dict = build_prefix_dict();
+        assert!(dict.check_word(b"happy"));
+    }
+
+    #[test]
+    fn test_prefix_synthetic_wrong_prefix() {
+        let dict = build_prefix_dict();
+        assert!(!dict.check_word(b"rehappy"));
+    }
+
+    #[test]
+    fn test_prefix_synthetic_nonsense_after_prefix() {
+        let dict = build_prefix_dict();
+        assert!(!dict.check_word(b"unxyzabc"));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_empty() {
+        assert!(match_prefix_condition(b"", b"anything"));
+        assert!(match_prefix_condition(b"", b""));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_literal() {
+        assert!(match_prefix_condition(b"ab", b"abcdef"));
+        assert!(!match_prefix_condition(b"ab", b"xbcdef"));
+        assert!(!match_prefix_condition(b"ab", b"a"));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_char_class() {
+        assert!(match_prefix_condition(b"[abc]", b"bfoo"));
+        assert!(match_prefix_condition(b"[abc]", b"afoo"));
+        assert!(!match_prefix_condition(b"[abc]", b"xfoo"));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_negated_class() {
+        assert!(match_prefix_condition(b"[^abc]", b"xfoo"));
+        assert!(!match_prefix_condition(b"[^abc]", b"afoo"));
+        assert!(!match_prefix_condition(b"[^abc]", b"bfoo"));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_dot() {
+        assert!(match_prefix_condition(b".", b"x"));
+        assert!(match_prefix_condition(b".", b"anything"));
+        assert!(!match_prefix_condition(b".", b""));
+    }
+
+    #[test]
+    fn test_match_prefix_condition_complex() {
+        assert!(match_prefix_condition(b"[aeiou]b", b"abcd"));
+        assert!(!match_prefix_condition(b"[aeiou]b", b"xbcd"));
+        assert!(!match_prefix_condition(b"[aeiou]b", b"axcd"));
+    }
+
+    #[test]
+    fn test_prefix_synthetic_with_condition() {
+        let mut arena = Arena::default();
+
+        let word_flags: u32 = (WF_AFX as u32) | (7u32 << 24);
+        let foldtree = WordTree {
+            byts: vec![
+                2, b'a', b'o', 1, b'k', 1, 0, 1, b'k', 1, 0,
+            ],
+            idxs: vec![
+                0, 3, 7, 0, 5, 0, word_flags, 0, 9, 0, word_flags,
+            ],
+        };
+
+        // Condition "[ao]" means the word after prefix must start with 'a' or 'o'.
+        let cond = arena.alloc(b"[ao]");
+        let prefcond = vec![cond];
+
+        // Prefix "un" with affix_id=7, condnr=0 (index into prefcond)
+        let prefix_pidx: u32 = (0u32 << 8) | 7;
+        let prefixtree = WordTree {
+            byts: vec![1, b'u', 1, b'n', 1, 0],
+            idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
+        };
+
+        let dict = Dictionary {
+            arena,
+            foldtree,
+            keeptree: WordTree::new(),
+            prefixtree,
+            charflags: CharFlags::new(),
+            regions: Vec::new(),
+            midword: Bytes::default(),
+            prefcond,
+            comp_max: MAXWLEN as u8,
+            comp_minlen: 0,
+            comp_sylmax: MAXWLEN as u8,
+            comp_options: 0,
+            comp_rules: CompoundRules::new(),
+            comp_patterns: Vec::new(),
+            syllable: Syllable::new(),
+            nobreak: false,
+        };
+
+        // "unok" -> prefix "un" + "ok", "ok" starts with 'o' which is in [ao] -> valid
+        assert!(dict.check_word(b"unok"));
+        // "unak" -> prefix "un" + "ak", "ak" starts with 'a' which is in [ao] -> valid
+        assert!(dict.check_word(b"unak"));
+        // Direct lookups also work
+        assert!(dict.check_word(b"ok"));
+        assert!(dict.check_word(b"ak"));
+    }
+
+    #[test]
+    fn test_prefix_synthetic_rare_prefix() {
+        let arena = Arena::default();
+
+        let word_flags: u32 = (WF_AFX as u32) | (3u32 << 24);
+        let foldtree = WordTree {
+            byts: vec![1, b'g', 1, b'o', 1, 0],
+            idxs: vec![0, 2, 0, 4, 0, word_flags],
+        };
+
+        // Prefix with WFP_RARE flag set
+        let prefix_pidx: u32 = (WFP_RARE << 24) | 3;
+        let prefixtree = WordTree {
+            byts: vec![1, b'a', 1, 0],
+            idxs: vec![0, 2, 0, prefix_pidx],
+        };
+
+        let dict = Dictionary {
+            arena,
+            foldtree,
+            keeptree: WordTree::new(),
+            prefixtree,
+            charflags: CharFlags::new(),
+            regions: Vec::new(),
+            midword: Bytes::default(),
+            prefcond: vec![Bytes::default()],
+            comp_max: MAXWLEN as u8,
+            comp_minlen: 0,
+            comp_sylmax: MAXWLEN as u8,
+            comp_options: 0,
+            comp_rules: CompoundRules::new(),
+            comp_patterns: Vec::new(),
+            syllable: Syllable::new(),
+            nobreak: false,
+        };
+
+        // "ago" -> prefix "a" + "go", rare prefix -> ValidRare
+        assert!(dict.check_word(b"ago"));
+        assert!(dict.check_word(b"go"));
     }
 }

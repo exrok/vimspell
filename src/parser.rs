@@ -173,9 +173,9 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
         }
     }
 
-    let foldtree = read_wordtree(&mut r)?;
-    let keeptree = read_wordtree(&mut r)?;
-    let prefixtree = read_wordtree(&mut r)?;
+    let foldtree = read_wordtree(&mut r, false)?;
+    let keeptree = read_wordtree(&mut r, false)?;
+    let prefixtree = read_wordtree(&mut r, true)?;
 
     Ok(Dictionary {
         arena: a,
@@ -464,7 +464,7 @@ fn read_syllable(
     Ok(())
 }
 
-fn read_wordtree(r: &mut SpellReader) -> Result<WordTree, ParseError> {
+fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, ParseError> {
     let node_count = r.read_u32_be()? as usize;
 
     if node_count == 0 {
@@ -474,7 +474,7 @@ fn read_wordtree(r: &mut SpellReader) -> Result<WordTree, ParseError> {
     let mut byts = vec![0u8; node_count];
     let mut idxs = vec![0u32; node_count];
 
-    read_tree_node(r, &mut byts, &mut idxs, node_count, 0)?;
+    read_tree_node(r, &mut byts, &mut idxs, node_count, 0, prefixtree)?;
 
     Ok(WordTree { byts, idxs })
 }
@@ -487,6 +487,7 @@ fn read_tree_node(
     idxs: &mut [u32],
     maxidx: usize,
     startidx: usize,
+    prefixtree: bool,
 ) -> Result<usize, ParseError> {
     let mut idx = startidx;
 
@@ -506,7 +507,7 @@ fn read_tree_node(
         let c = r.read_u8()?;
 
         if c <= BY_SPECIAL {
-            if c == BY_NOFLAGS {
+            if c == BY_NOFLAGS && !prefixtree {
                 idxs[idx] = 0;
                 byts[idx] = 0;
             } else if c == BY_INDEX {
@@ -517,6 +518,16 @@ fn read_tree_node(
                 idxs[idx] = n | SHARED_MASK;
                 let xbyte = r.read_u8()?;
                 byts[idx] = xbyte;
+            } else if prefixtree {
+                let pflags = if c == BY_FLAGS {
+                    (r.read_u8()? as u32) << 24
+                } else {
+                    0
+                };
+                let affix_id = r.read_u8()? as u32;
+                let prefcondnr = r.read_u16_be()? as u32;
+                idxs[idx] = pflags | (prefcondnr << 8) | affix_id;
+                byts[idx] = 0;
             } else {
                 let mut flags = if c == BY_FLAGS || c == BY_FLAGS2 {
                     r.read_u8()? as u32
@@ -548,7 +559,7 @@ fn read_tree_node(
                 idxs[pos] &= !SHARED_MASK;
             } else {
                 idxs[pos] = idx as u32;
-                idx = read_tree_node(r, byts, idxs, maxidx, idx)?;
+                idx = read_tree_node(r, byts, idxs, maxidx, idx, prefixtree)?;
             }
         }
     }
