@@ -42,6 +42,15 @@ impl<'a> SpellReader<'a> {
 
     #[track_caller]
     #[inline]
+    fn read_u16_le(&mut self) -> Result<u16, ParseError> {
+        let Some((bytes, remainder)) = self.data.split_first_chunk::<2>() else {
+            bail!(UnexpectedEof)
+        };
+        self.data = remainder;
+        Ok(u16::from_le_bytes(*bytes))
+    }
+    #[track_caller]
+    #[inline]
     fn read_u16_be(&mut self) -> Result<u16, ParseError> {
         let Some((bytes, remainder)) = self.data.split_first_chunk::<2>() else {
             bail!(UnexpectedEof)
@@ -590,21 +599,175 @@ fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, Pars
 
     let mut byts = vec![0u8; node_count];
     let mut idxs = vec![0u32; node_count];
-
-    read_tree_node(r, &mut byts, &mut idxs, node_count, 0, prefixtree)?;
+    if prefixtree {
+        read_tree_node_prefixtree(r, &mut byts, &mut idxs, node_count, 0)?;
+    } else {
+        unsafe {
+            read_tree_node_ptr(r, byts.as_mut_ptr(), idxs.as_mut_ptr(), node_count, 0)?;
+        }
+    }
 
     Ok(WordTree { byts, idxs })
 }
 
 const SHARED_MASK: u32 = 0x8000000;
+macro_rules! rtry {
+    ($($tt:tt)*) => {
+        match $($tt)* {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+}
 
-fn read_tree_node(
+// read_tree_node_ptr, is by far the hottest function. The bound checks increase load
+// times and instruction counts by upto 25%.
+unsafe fn read_tree_node_ptr(
+    r: &mut SpellReader,
+    byts: *mut u8,
+    idxs: *mut u32,
+    maxidx: usize,
+    startidx: usize,
+) -> Result<usize, ParseError> {
+    let mut idx = startidx;
+
+    let len = rtry!(r.read_u8()) as usize;
+    if len == 0 {
+        bail!(InvalidSiblingCount)
+    }
+
+    if startidx + len >= maxidx {
+        bail!(TreeIndexOverflow)
+    }
+
+    unsafe {
+        *byts.add(idx) = len as u8;
+    }
+    // len == 1 represents the majority of nodes,
+    // Add this case reduces instruction counts by 15%
+    if len == 1 {
+        idx += 1;
+        let ch = rtry!(r.read_u8());
+        if ch > BY_SPECIAL {
+            unsafe {
+                *byts.add(idx) = ch;
+                *idxs.add(idx) = idx as u32 + 1;
+                return read_tree_node_ptr(r, byts, idxs, maxidx, idx + 1);
+            }
+        } else if ch == BY_INDEX {
+            let n = rtry!(r.read_u32_be());
+            unsafe {
+                *byts.add(idx) = n as u8;
+            }
+            let n = n >> 8;
+            if n as usize >= maxidx {
+                bail!(InvalidSharedIndex)
+            }
+            unsafe {
+                *idxs.add(idx) = n;
+            }
+        } else if ch == BY_NOFLAGS {
+            unsafe {
+                *byts.add(idx) = 0;
+            }
+        } else if ch == BY_FLAGS {
+            let mut flags = rtry!(r.read_u8()) as u32;
+            if flags & (WF_REGION as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 16;
+            }
+            if flags & (WF_AFX as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 24;
+            }
+            unsafe {
+                *idxs.add(idx) = flags;
+            }
+        } else {
+            let mut flags = r.read_u16_le()? as u32;
+            if flags & (WF_REGION as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 16;
+            }
+            if flags & (WF_AFX as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 24;
+            }
+            unsafe {
+                *idxs.add(idx) = flags;
+            }
+        }
+        return Ok(idx + 1);
+    }
+    for _ in 0..len {
+        idx += 1;
+        let by;
+        let mut flags;
+        let ch = rtry!(r.read_u8());
+        if ch > BY_SPECIAL {
+            unsafe {
+                *byts.add(idx) = ch;
+            }
+        } else if ch == BY_INDEX {
+            let n = rtry!(r.read_u32_be());
+            by = n as u8;
+            let n = n >> 8;
+            if n as usize >= maxidx {
+                bail!(InvalidSharedIndex)
+            }
+            flags = n | SHARED_MASK;
+            unsafe {
+                *byts.add(idx) = by;
+                *idxs.add(idx) = flags;
+            }
+        } else if ch == BY_NOFLAGS {
+            unsafe {
+                *byts.add(idx) = 0;
+            }
+        } else if ch == BY_FLAGS {
+            flags = rtry!(r.read_u8()) as u32;
+            if flags & (WF_REGION as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 16;
+            }
+            if flags & (WF_AFX as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 24;
+            }
+            unsafe {
+                *idxs.add(idx) = flags;
+            }
+        } else {
+            flags = r.read_u16_le()? as u32;
+            if flags & (WF_REGION as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 16;
+            }
+            if flags & (WF_AFX as u32) != 0 {
+                flags |= (rtry!(r.read_u8()) as u32) << 24;
+            }
+            unsafe {
+                *idxs.add(idx) = flags;
+            }
+        }
+    }
+    idx += 1;
+    for i in 1..len + 1 {
+        let pos = startidx + i;
+        unsafe {
+            if *byts.add(pos) != 0 {
+                let idn = &mut *idxs.add(pos);
+                if *idn & SHARED_MASK != 0 {
+                    *idn &= !SHARED_MASK;
+                } else {
+                    *idn = idx as u32;
+                    idx = rtry!(read_tree_node_ptr(r, byts, idxs, maxidx, idx));
+                }
+            }
+        }
+    }
+    Ok(idx)
+}
+
+fn read_tree_node_prefixtree(
     r: &mut SpellReader,
     byts: &mut [u8],
     idxs: &mut [u32],
     maxidx: usize,
     startidx: usize,
-    prefixtree: bool,
 ) -> Result<usize, ParseError> {
     let mut idx = startidx;
 
@@ -624,10 +787,7 @@ fn read_tree_node(
         let c = r.read_u8()?;
 
         if c <= BY_SPECIAL {
-            if c == BY_NOFLAGS && !prefixtree {
-                idxs[idx] = 0;
-                byts[idx] = 0;
-            } else if c == BY_INDEX {
+            if c == BY_INDEX {
                 let n = r.read_u24_be()?;
                 if n as usize >= maxidx {
                     bail!(InvalidSharedIndex)
@@ -635,7 +795,7 @@ fn read_tree_node(
                 idxs[idx] = n | SHARED_MASK;
                 let xbyte = r.read_u8()?;
                 byts[idx] = xbyte;
-            } else if prefixtree {
+            } else {
                 let pflags = if c == BY_FLAGS {
                     (r.read_u8()? as u32) << 24
                 } else {
@@ -644,24 +804,6 @@ fn read_tree_node(
                 let affix_id = r.read_u8()? as u32;
                 let prefcondnr = r.read_u16_be()? as u32;
                 idxs[idx] = pflags | (prefcondnr << 8) | affix_id;
-                byts[idx] = 0;
-            } else {
-                let mut flags = if c == BY_FLAGS || c == BY_FLAGS2 {
-                    r.read_u8()? as u32
-                } else {
-                    0
-                };
-                if c == BY_FLAGS2 {
-                    flags |= (r.read_u8()? as u32) << 8;
-                }
-                if flags & (WF_REGION as u32) != 0 {
-                    flags |= (r.read_u8()? as u32) << 16;
-                }
-                if flags & (WF_AFX as u32) != 0 {
-                    flags |= (r.read_u8()? as u32) << 24;
-                }
-                idxs[idx] = flags;
-                byts[idx] = 0;
             }
         } else {
             byts[idx] = c;
@@ -669,14 +811,14 @@ fn read_tree_node(
         idx += 1;
     }
 
-    for i in 1..=len {
+    for i in 1..len + 1 {
         let pos = startidx + i;
         if byts[pos] != 0 {
             if idxs[pos] & SHARED_MASK != 0 {
                 idxs[pos] &= !SHARED_MASK;
             } else {
                 idxs[pos] = idx as u32;
-                idx = read_tree_node(r, byts, idxs, maxidx, idx, prefixtree)?;
+                idx = read_tree_node_prefixtree(r, byts, idxs, maxidx, idx)?;
             }
         }
     }
