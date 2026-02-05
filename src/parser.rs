@@ -117,6 +117,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let mut comp_patterns = Vec::new();
     let mut syllable = Syllable::new();
     let mut nobreak = false;
+    let mut sal: Option<SalInfo> = None;
 
     loop {
         let section_id = r.read_u8()?;
@@ -160,6 +161,9 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
             SN_SYLLABLE => {
                 read_syllable(&mut r, &mut a, len, &mut syllable)?;
             }
+            SN_SAL => {
+                sal = Some(read_sal_section(&mut r, len)?);
+            }
             SN_NOBREAK => {
                 nobreak = true;
                 r.skip(len)?;
@@ -194,6 +198,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
         comp_patterns,
         syllable,
         nobreak,
+        sal,
     })
 }
 
@@ -462,6 +467,118 @@ fn read_syllable(
     }
 
     Ok(())
+}
+
+fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseError> {
+    if len < 3 {
+        bail!(UnexpectedEof)
+    }
+
+    let salflags = r.read_u8()?;
+    let followup = salflags & SAL_F0LLOWUP != 0;
+    let collapse = salflags & SAL_COLLAPSE != 0;
+    let rem_accents = salflags & SAL_REM_ACCENTS != 0;
+
+    let salcount = r.read_u16_be()? as usize;
+
+    let mut items = Vec::with_capacity(salcount + 1);
+
+    for _ in 0..salcount {
+        let fromlen = r.read_u8()? as usize;
+        let from = r.read_exact(fromlen)?;
+        let tolen = r.read_u8()? as usize;
+        let to_bytes = r.read_exact(tolen)?;
+
+        // Parse the "from" pattern into lead, oneof, rules.
+        let mut lead = Vec::new();
+        let mut oneof = Vec::new();
+        let mut rules = Vec::new();
+
+        let Ok(as_str) = std::str::from_utf8(from) else {
+            bail!(UnknownRequiredSection)
+        };
+        let from_chars: Vec<char> = as_str.chars().collect();
+
+        let mut fi = 0;
+
+        // Read lead: chars until a special ASCII char.
+        while fi < from_chars.len() {
+            let c = from_chars[fi];
+            if c.is_ascii() && b"0123456789(-<^$".contains(&(c as u8)) {
+                break;
+            }
+            lead.push(c);
+            fi += 1;
+        }
+
+        // Check for (abc) oneof group.
+        if fi < from_chars.len() && from_chars[fi] == '(' {
+            fi += 1; // skip '('
+            while fi < from_chars.len() && from_chars[fi] != ')' {
+                oneof.push(from_chars[fi]);
+                fi += 1;
+            }
+            if fi < from_chars.len() {
+                fi += 1; // skip ')'
+            }
+        }
+
+        // Everything remaining goes into rules (as bytes, they're ASCII).
+        for &ch in &from_chars[fi..] {
+            rules.push(ch as u8);
+        }
+
+        let Ok(to_str) = std::str::from_utf8(to_bytes) else {
+            bail!(UnexpectedEof)
+        };
+        let to: Vec<char> = to_str.chars().collect();
+
+        items.push(SalItem {
+            lead,
+            oneof,
+            rules,
+            to,
+        });
+    }
+
+    // Add sentinel with empty lead.
+    items.push(SalItem {
+        lead: Vec::new(),
+        oneof: Vec::new(),
+        rules: Vec::new(),
+        to: Vec::new(),
+    });
+
+    // Build the first-byte index table.
+    // First, sort items (except sentinel) by low byte of first codepoint, stable.
+    let sentinel = items.pop().unwrap();
+    items.sort_by_key(|item| {
+        if let Some(&first) = item.lead.first() {
+            (first as u32 & 0xff) as u16
+        } else {
+            256u16 // empty lead goes to end
+        }
+    });
+    items.push(sentinel);
+
+    let mut first = [-1i32; 256];
+    for (i, item) in items.iter().enumerate() {
+        if item.lead.is_empty() {
+            break; // sentinel
+        }
+        let c = (item.lead[0] as u32 & 0xff) as usize;
+        if first[c] == -1 {
+            first[c] = i as i32;
+        }
+    }
+
+    Ok(SalInfo {
+        items,
+        first,
+        followup,
+        collapse,
+        rem_accents,
+    })
 }
 
 fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, ParseError> {
