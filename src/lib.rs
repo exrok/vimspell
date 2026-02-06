@@ -701,17 +701,6 @@ impl Dictionary {
         !self.common_words.is_empty()
     }
 
-    pub(crate) fn similar_chars(&self, c1: u8, c2: u8) -> bool {
-        let Some(map) = &self.map else {
-            return false;
-        };
-        let m1 = map.map_array[c1 as usize];
-        if m1 == 0 {
-            return false;
-        }
-        m1 == map.map_array[c2 as usize]
-    }
-
     pub(crate) fn score_wordcount_adj(&self, score: i32, word: &[u8]) -> i32 {
         let count = self.common_words.lookup(&self.arena, word);
         if count == 0 {

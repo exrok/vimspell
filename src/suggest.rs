@@ -80,19 +80,34 @@ impl Default for TryState {
     }
 }
 
-fn go_deeper(stack: &mut [TryState; MAXWLEN_EXT], depth: usize, score_add: i32) {
-    let parent = stack[depth];
-    let child = &mut stack[depth + 1];
-    *child = parent;
-    child.state = State::Start;
-    child.score = parent.score + score_add;
-    child.curi = 1;
-    child.flags = 0;
+/// SAFETY: depth must be < MAXWLEN - 1 (checked by can_go_deeper before every call).
+#[inline(always)]
+unsafe fn go_deeper(stack: *mut TryState, depth: usize, score_add: i32) {
+    debug_assert!(depth + 1 < MAXWLEN_EXT);
+    unsafe {
+        let parent = *stack.add(depth);
+        let child = &mut *stack.add(depth + 1);
+        *child = parent;
+        child.state = State::Start;
+        child.score = parent.score + score_add;
+        child.curi = 1;
+        child.flags = 0;
+    }
 }
 
-fn can_go_deeper(stack: &[TryState; MAXWLEN_EXT], depth: usize, add: i32, maxscore: i32) -> bool {
-    depth < MAXWLEN - 1 && stack[depth].score + add < maxscore
+#[inline(always)]
+unsafe fn can_go_deeper(stack: *const TryState, depth: usize, add: i32, maxscore: i32) -> bool {
+    unsafe { depth < MAXWLEN - 1 && (*stack.add(depth)).score + add < maxscore }
 }
+
+/// SAFETY: depth must be a valid index into the stack array.
+#[inline(always)]
+unsafe fn sp(stack: *mut TryState, depth: usize) -> &'static mut TryState {
+    unsafe { &mut *stack.add(depth) }
+}
+
+const SUG_CLEAN_COUNT: usize = 150;
+const SUG_MAX_COUNT: usize = SUG_CLEAN_COUNT + 50;
 
 fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
     match scored.entry_ref(word) {
@@ -101,27 +116,58 @@ fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
             if score < *existing_score {
                 *existing_score = score;
             }
-            return;
         }
         hashbrown::hash_map::EntryRef::Vacant(vacant_entry_ref) => {
             vacant_entry_ref.insert(score);
-            return;
         }
     }
+}
+
+/// Reduce maxscore when too many suggestions have accumulated, matching
+/// Neovim's cleanup_suggestions() behavior. Returns the new maxscore.
+fn cleanup_suggestions(scored: &mut HashMap<Vec<u8>, i32>, maxscore: i32) -> i32 {
+    let mut scores: Vec<i32> = scored.values().copied().collect();
+    if scores.len() <= SUG_CLEAN_COUNT {
+        return maxscore;
+    }
+    scores.select_nth_unstable(SUG_CLEAN_COUNT - 1);
+    let threshold = scores[SUG_CLEAN_COUNT - 1];
+    scored.retain(|_, &mut score| score <= threshold);
+    threshold
 }
 pub struct FWord(pub [u8; MAXWLEN_EXT]);
 impl std::ops::Index<u8> for FWord {
     type Output = u8;
     #[inline(always)]
     fn index(&self, index: u8) -> &Self::Output {
-        &self.0[index as usize]
+        // SAFETY: FWord is [u8; 255]. fidx never reaches 255 because can_go_deeper
+        // enforces depth < MAXWLEN - 1 (253), bounding all derived indices.
+        debug_assert!((index as usize) < MAXWLEN_EXT);
+        unsafe { self.0.get_unchecked(index as usize) }
     }
 }
 
 impl std::ops::IndexMut<u8> for FWord {
     #[inline(always)]
     fn index_mut(&mut self, index: u8) -> &mut Self::Output {
-        &mut self.0[index as usize]
+        debug_assert!((index as usize) < MAXWLEN_EXT);
+        unsafe { self.0.get_unchecked_mut(index as usize) }
+    }
+}
+
+/// Checks if two characters are similar according to the MAP table.
+/// `map_array` is a pointer to the 256-entry map array (or null if no MAP data).
+#[inline(always)]
+unsafe fn similar_chars(map_array: *const u32, c1: u8, c2: u8) -> bool {
+    if map_array.is_null() {
+        return false;
+    }
+    unsafe {
+        let m1 = *map_array.add(c1 as usize);
+        if m1 == 0 {
+            return false;
+        }
+        m1 == *map_array.add(c2 as usize)
     }
 }
 
@@ -136,518 +182,547 @@ pub(crate) fn suggest_trie_walk(
         return;
     }
 
-    let byts = &dict.foldtree.byts;
-    let idxs = &dict.foldtree.idxs;
+    let byts = dict.foldtree.byts.as_ptr();
+    let byts_len = dict.foldtree.byts.len();
+    let idxs = dict.foldtree.idxs.as_ptr();
 
-    debug_assert_eq!(
-        MAXWLEN_EXT,
-        u8::MAX as usize,
-        "u8::MAX size implies u8 index always succeeds removing branch"
-    );
+    // Pre-extract the map_array pointer to avoid Option check per iteration.
+    let map_array: *const u32 = match &dict.map {
+        Some(map) => map.map_array.as_ptr(),
+        None => std::ptr::null(),
+    };
+
+    let mut maxscore = maxscore;
     let mut tword = [0u8; MAXWLEN_EXT];
-    let mut stack = [TryState::default(); MAXWLEN_EXT];
+    let mut stack_arr = [TryState::default(); MAXWLEN_EXT];
+    let stack = stack_arr.as_mut_ptr();
     let mut depth: u8 = 0;
     let mut repextra: i32 = 0;
     let mut eff_fword_len = fword_len;
 
-    loop {
-        let d = depth as usize;
-        match stack[d].state {
-            State::Start => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len_byte) = byts.get(arridx) else {
-                    depth -= 1;
-                    continue;
-                };
-                let len = len_byte as i16;
-                let cur = stack[d].curi;
-
-                if cur > len || byts[arridx + cur as usize] != 0 {
-                    stack[d].state = State::EndNul;
-                    continue;
-                }
-
-                stack[d].curi += 1;
-
-                let flags = idxs[arridx + cur as usize];
-
-                if (flags as u16) & WF_NOSUGGEST != 0 {
-                    continue;
-                }
-
-                let fidx = stack[d].fidx;
-                let fword_ends = fidx >= eff_fword_len;
-                let tword_len = stack[d].tword_len as usize;
-
-                let goodword_ends = !(fword_ends && (flags as u16 & WF_NEEDCOMP != 0));
-
-                if (flags as u8) & WF_BANNED != 0 {
-                    continue;
-                }
-
-                let mut newscore: i32 = 0;
-                if (flags as u8) & WF_REGION != 0 {
-                    let region_mask = ((flags >> 16) & 0xff) as u8;
-                    if region_mask & dict.region == 0 {
-                        newscore += SCORE_REGION;
+    // SAFETY notes for the entire loop:
+    // - `depth` is bounded: it only increases via `go_deeper` which requires
+    //   `depth < MAXWLEN - 1` (253), so `depth` is always in 0..253 and
+    //   `depth as usize` is a valid index into stack[255] and tword[255].
+    // - `arridx` comes from idxs[] entries which are valid trie node pointers.
+    //   We validate arridx < byts_len before using it.
+    // - `arridx + curi` is always <= arridx + len_byte, which is within the
+    //   trie node's allocated range in byts/idxs.
+    // - `fidx` is bounded by depth + fword_len, always < 255.
+    unsafe {
+        loop {
+            let d = depth as usize;
+            match sp(stack, d).state {
+                State::Start => {
+                    let arridx = sp(stack, d).arridx as usize;
+                    if arridx >= byts_len {
+                        depth -= 1;
+                        continue;
                     }
-                }
-                if (flags as u8) & WF_RARE != 0 {
-                    newscore += SCORE_RARE;
-                }
+                    let len = *byts.add(arridx) as i16;
+                    let cur = sp(stack, d).curi;
 
-                if fword_ends && goodword_ends && stack[d].fidx >= stack[d].fidxtry {
-                    let total = stack[d].score + newscore;
-                    if total < maxscore {
-                        let split_off = stack[d].split_tword_off as usize;
-                        if split_off > 0 {
-                            let mut word = Vec::with_capacity(tword_len + 1);
-                            word.extend_from_slice(&tword[..split_off]);
-                            word.push(b' ');
-                            word.extend_from_slice(&tword[split_off..tword_len]);
-                            add_suggestion(scored, &word, total);
-                        } else {
-                            add_suggestion(scored, &tword[..tword_len], total);
+                    if cur > len || *byts.add(arridx + cur as usize) != 0 {
+                        sp(stack, d).state = State::EndNul;
+                        continue;
+                    }
+
+                    sp(stack, d).curi += 1;
+
+                    let flags = *idxs.add(arridx + cur as usize);
+
+                    if (flags as u16) & WF_NOSUGGEST != 0 {
+                        continue;
+                    }
+
+                    let fidx = sp(stack, d).fidx;
+                    let fword_ends = fidx >= eff_fword_len;
+                    let tword_len = sp(stack, d).tword_len as usize;
+
+                    let goodword_ends = !(fword_ends && (flags as u16 & WF_NEEDCOMP != 0));
+
+                    if (flags as u8) & WF_BANNED != 0 {
+                        continue;
+                    }
+
+                    let mut newscore: i32 = 0;
+                    if (flags as u8) & WF_REGION != 0 {
+                        let region_mask = ((flags >> 16) & 0xff) as u8;
+                        if region_mask & dict.region == 0 {
+                            newscore += SCORE_REGION;
+                        }
+                    }
+                    if (flags as u8) & WF_RARE != 0 {
+                        newscore += SCORE_RARE;
+                    }
+
+                    if fword_ends
+                        && goodword_ends
+                        && sp(stack, d).fidx >= sp(stack, d).fidxtry
+                    {
+                        let total = sp(stack, d).score + newscore;
+                        if total < maxscore {
+                            let split_off = sp(stack, d).split_tword_off as usize;
+                            if split_off > 0 {
+                                let mut word = Vec::with_capacity(tword_len + 1);
+                                word.extend_from_slice(&tword[..split_off]);
+                                word.push(b' ');
+                                word.extend_from_slice(&tword[split_off..tword_len]);
+                                add_suggestion(scored, &word, total);
+                            } else {
+                                add_suggestion(scored, &tword[..tword_len], total);
+                            }
+
+                            if scored.len() > SUG_MAX_COUNT {
+                                maxscore = cleanup_suggestions(scored, maxscore);
+                            }
+                        }
+                    }
+
+                    if !fword_ends
+                        && goodword_ends
+                        && sp(stack, d).split_tword_off == 0
+                        && tword_len >= 2
+                        && (eff_fword_len - fidx) >= 2
+                        && sp(stack, d).fidx >= sp(stack, d).fidxtry
+                    {
+                        let extra = newscore + SCORE_SPLIT;
+                        if can_go_deeper(stack, d, extra, maxscore) {
+                            let prev_fidx = sp(stack, d).fidx;
+                            go_deeper(stack, d, extra);
+                            depth += 1;
+                            let sd = depth as usize;
+                            sp(stack, sd).arridx = 0;
+                            sp(stack, sd).split_tword_off = tword_len as u8;
+                            sp(stack, sd).split_fidx = prev_fidx;
+                            continue;
                         }
                     }
                 }
 
-                if !fword_ends
-                    && goodword_ends
-                    && stack[d].split_tword_off == 0
-                    && tword_len >= 2
-                    && (eff_fword_len - fidx) >= 2
-                    && stack[d].fidx >= stack[d].fidxtry
-                {
-                    let extra = newscore + SCORE_SPLIT;
-                    if can_go_deeper(&stack, d, extra, maxscore) {
-                        go_deeper(&mut stack, d, extra);
+                State::EndNul => {
+                    if sp(stack, d).fidx >= eff_fword_len {
+                        sp(stack, d).state = State::Del;
+                    } else {
+                        sp(stack, d).state = State::Plain;
+                    }
+                }
+
+                State::Plain => {
+                    let arridx = sp(stack, d).arridx as usize;
+                    if arridx >= byts_len {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+                    let len = *byts.add(arridx) as i16;
+
+                    if sp(stack, d).curi > len {
+                        sp(stack, d).state = if sp(stack, d).fidx >= sp(stack, d).fidxtry {
+                            State::Del
+                        } else {
+                            State::Final
+                        };
+                        continue;
+                    }
+
+                    let idx = arridx + sp(stack, d).curi as usize;
+                    sp(stack, d).curi += 1;
+                    let c = *byts.add(idx);
+
+                    let fidx = sp(stack, d).fidx;
+                    // Match C behavior: always use SCORE_SUBST for pruning.
+                    // similar_chars adjustment happens post-go_deeper (below).
+                    let newscore = if fidx < eff_fword_len && c == fword[fidx] {
+                        0
+                    } else if fidx >= eff_fword_len {
+                        SCORE_INS
+                    } else {
+                        SCORE_SUBST
+                    };
+
+                    if newscore != 0
+                        && (sp(stack, d).fidx < sp(stack, d).fidxtry
+                            || ((sp(stack, d).flags & TSF_DIDDEL) != 0
+                                && c == fword[sp(stack, d).delidx]))
+                    {
+                        continue;
+                    }
+
+                    if can_go_deeper(stack, d, newscore, maxscore) {
+                        go_deeper(stack, d, newscore);
                         depth += 1;
                         let sd = depth as usize;
-                        stack[sd].arridx = 0;
-                        stack[sd].split_tword_off = tword_len as u8;
-                        stack[sd].split_fidx = stack[d].fidx;
-                        continue;
-                    }
-                }
-            }
+                        if fidx < eff_fword_len {
+                            sp(stack, sd).fidx += 1;
+                        }
+                        *tword.get_unchecked_mut(sp(stack, sd).tword_len as usize) = c;
+                        sp(stack, sd).tword_len += 1;
+                        sp(stack, sd).arridx = *idxs.add(idx);
 
-            State::EndNul => {
-                if stack[d].fidx >= eff_fword_len {
-                    stack[d].state = State::Del;
-                } else {
-                    stack[d].state = State::Plain;
-                }
-            }
-
-            State::Plain => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len_byte) = byts.get(arridx) else {
-                    stack[d].state = State::Final;
-                    continue;
-                };
-                let len = len_byte as i16;
-
-                if stack[d].curi > len {
-                    stack[d].state = if stack[d].fidx >= stack[d].fidxtry {
-                        State::Del
-                    } else {
-                        State::Final
-                    };
-                    continue;
-                }
-
-                let idx = arridx + stack[d].curi as usize;
-                stack[d].curi += 1;
-                let c = byts[idx];
-
-                let fidx = stack[d].fidx;
-                let newscore = if fidx < eff_fword_len && c == fword[fidx] {
-                    0
-                } else if fidx >= eff_fword_len {
-                    SCORE_INS
-                } else if dict.similar_chars(fword[fidx], c) {
-                    SCORE_SIMILAR
-                } else {
-                    SCORE_SUBST
-                };
-
-                if newscore != 0
-                    && (stack[d].fidx < stack[d].fidxtry
-                        || ((stack[d].flags & TSF_DIDDEL) != 0 && c == fword[stack[d].delidx]))
-                {
-                    continue;
-                }
-
-                if can_go_deeper(&stack, d, newscore, maxscore) {
-                    go_deeper(&mut stack, d, newscore);
-                    depth += 1;
-                    let sd = depth as usize;
-                    if fidx < eff_fword_len {
-                        stack[sd].fidx += 1;
-                    }
-                    tword[stack[sd].tword_len as usize] = c;
-                    stack[sd].tword_len += 1;
-                    stack[sd].arridx = idxs[idx];
-
-                    if newscore == SCORE_SUBST && fidx < eff_fword_len {
-                        if dict.similar_chars(fword[fidx], c) {
-                            stack[sd].score -= SCORE_SUBST - SCORE_SIMILAR;
+                        if newscore == SCORE_SUBST && fidx < eff_fword_len {
+                            if similar_chars(map_array, fword[fidx], c) {
+                                sp(stack, sd).score -= SCORE_SUBST - SCORE_SIMILAR;
+                            }
                         }
                     }
                 }
-            }
 
-            State::Del => {
-                stack[d].state = State::InsPrep;
-                stack[d].curi = 1;
+                State::Del => {
+                    sp(stack, d).state = State::InsPrep;
+                    sp(stack, d).curi = 1;
 
-                let fidx = stack[d].fidx;
-                if fidx >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
-                    continue;
-                }
+                    let fidx = sp(stack, d).fidx;
+                    if fidx >= eff_fword_len || sp(stack, d).fidx < sp(stack, d).fidxtry {
+                        continue;
+                    }
 
-                let newscore = if fidx > 0 && fword[fidx] == fword[fidx - 1] {
-                    SCORE_DELDUP
-                } else {
-                    SCORE_DEL
-                };
+                    // Match C behavior: always use SCORE_DEL for pruning.
+                    // DELDUP adjustment happens post-go_deeper (below).
+                    let newscore = SCORE_DEL;
 
-                if can_go_deeper(&stack, d, newscore, maxscore) {
-                    go_deeper(&mut stack, d, newscore);
-                    depth += 1;
-                    let sd = depth as usize;
-                    stack[sd].flags |= TSF_DIDDEL;
-                    stack[sd].delidx = stack[d].fidx;
-                    stack[sd].fidx += 1;
+                    if can_go_deeper(stack, d, newscore, maxscore) {
+                        let prev_fidx = sp(stack, d).fidx;
+                        go_deeper(stack, d, newscore);
+                        depth += 1;
+                        let sd = depth as usize;
+                        sp(stack, sd).flags |= TSF_DIDDEL;
+                        sp(stack, sd).delidx = prev_fidx;
+                        sp(stack, sd).fidx += 1;
 
-                    let new_fidx = stack[sd].fidx;
-                    if new_fidx < eff_fword_len && fword[new_fidx] == fword[fidx] {
-                        stack[sd].score -= SCORE_DEL - SCORE_DELDUP;
+                        let new_fidx = sp(stack, sd).fidx;
+                        if new_fidx < eff_fword_len && fword[new_fidx] == fword[fidx] {
+                            sp(stack, sd).score -= SCORE_DEL - SCORE_DELDUP;
+                        }
                     }
                 }
-            }
 
-            State::InsPrep => {
-                if stack[d].flags & TSF_DIDDEL != 0 {
-                    stack[d].state = State::Swap;
-                    continue;
-                }
-
-                let arridx = stack[d].arridx as usize;
-                let Some(&len_byte) = byts.get(arridx) else {
-                    stack[d].state = State::Swap;
-                    continue;
-                };
-                let len = len_byte as i16;
-
-                loop {
-                    if stack[d].curi > len {
-                        stack[d].state = State::Swap;
-                        break;
+                State::InsPrep => {
+                    if sp(stack, d).flags & TSF_DIDDEL != 0 {
+                        sp(stack, d).state = State::Swap;
+                        continue;
                     }
-                    if byts[arridx + stack[d].curi as usize] != 0 {
-                        stack[d].state = State::Ins;
-                        break;
+
+                    let arridx = sp(stack, d).arridx as usize;
+                    if arridx >= byts_len {
+                        sp(stack, d).state = State::Swap;
+                        continue;
                     }
-                    stack[d].curi += 1;
-                }
-            }
+                    let len = *byts.add(arridx) as i16;
 
-            State::Ins => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len_byte) = byts.get(arridx) else {
-                    stack[d].state = State::Swap;
-                    continue;
-                };
-                let len = len_byte as i16;
-
-                if stack[d].curi > len {
-                    stack[d].state = State::Swap;
-                    continue;
-                }
-
-                let idx = arridx + stack[d].curi as usize;
-                stack[d].curi += 1;
-
-                let Some(&c) = byts.get(idx) else {
-                    stack[d].state = State::Swap;
-                    continue;
-                };
-
-                if c == 0 {
-                    continue;
-                }
-
-                let fidx = stack[d].fidx;
-                if fidx < eff_fword_len && c == fword[fidx] {
-                    continue;
-                }
-
-                if can_go_deeper(&stack, d, SCORE_INS, maxscore) {
-                    go_deeper(&mut stack, d, SCORE_INS);
-                    depth += 1;
-                    let sd = depth as usize;
-                    tword[stack[sd].tword_len as usize] = c;
-                    stack[sd].tword_len += 1;
-                    stack[sd].arridx = idxs[idx];
-
-                    let tw_len = stack[sd].tword_len as usize;
-                    if tw_len >= 2 && tword[tw_len - 2] == c {
-                        stack[sd].score -= SCORE_INS - SCORE_INSDUP;
+                    loop {
+                        if sp(stack, d).curi > len {
+                            sp(stack, d).state = State::Swap;
+                            break;
+                        }
+                        if *byts.add(arridx + sp(stack, d).curi as usize) != 0 {
+                            sp(stack, d).state = State::Ins;
+                            break;
+                        }
+                        sp(stack, d).curi += 1;
                     }
                 }
-            }
 
-            State::Swap => {
-                let fidx = stack[d].fidx;
-                if fidx + 1 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
-                    stack[d].state = State::RepIni;
-                    continue;
+                State::Ins => {
+                    let arridx = sp(stack, d).arridx as usize;
+                    if arridx >= byts_len {
+                        sp(stack, d).state = State::Swap;
+                        continue;
+                    }
+                    let len = *byts.add(arridx) as i16;
+
+                    if sp(stack, d).curi > len {
+                        sp(stack, d).state = State::Swap;
+                        continue;
+                    }
+
+                    let idx = arridx + sp(stack, d).curi as usize;
+                    sp(stack, d).curi += 1;
+
+                    if idx >= byts_len {
+                        sp(stack, d).state = State::Swap;
+                        continue;
+                    }
+                    let c = *byts.add(idx);
+
+                    if c == 0 {
+                        continue;
+                    }
+
+                    let fidx = sp(stack, d).fidx;
+                    if fidx < eff_fword_len && c == fword[fidx] {
+                        continue;
+                    }
+
+                    if can_go_deeper(stack, d, SCORE_INS, maxscore) {
+                        go_deeper(stack, d, SCORE_INS);
+                        depth += 1;
+                        let sd = depth as usize;
+                        *tword.get_unchecked_mut(sp(stack, sd).tword_len as usize) = c;
+                        sp(stack, sd).tword_len += 1;
+                        sp(stack, sd).arridx = *idxs.add(idx);
+
+                        let tw_len = sp(stack, sd).tword_len as usize;
+                        if tw_len >= 2 && *tword.get_unchecked(tw_len - 2) == c {
+                            sp(stack, sd).score -= SCORE_INS - SCORE_INSDUP;
+                        }
+                    }
                 }
 
-                let c1 = fword[fidx];
-                let c2 = fword[fidx + 1];
+                State::Swap => {
+                    let fidx = sp(stack, d).fidx;
+                    if fidx + 1 >= eff_fword_len || sp(stack, d).fidx < sp(stack, d).fidxtry {
+                        sp(stack, d).state = State::RepIni;
+                        continue;
+                    }
 
-                if c1 == c2 {
-                    stack[d].state = State::Swap3;
-                    continue;
+                    let c1 = fword[fidx];
+                    let c2 = fword[fidx + 1];
+
+                    if c1 == c2 {
+                        sp(stack, d).state = State::Swap3;
+                        continue;
+                    }
+
+                    if can_go_deeper(stack, d, SCORE_SWAP, maxscore) {
+                        sp(stack, d).state = State::Unswap;
+                        fword[fidx] = c2;
+                        fword[fidx + 1] = c1;
+                        let prev_fidx = sp(stack, d).fidx;
+                        go_deeper(stack, d, SCORE_SWAP);
+                        depth += 1;
+                        sp(stack, depth as usize).fidxtry = prev_fidx + 2;
+                    } else {
+                        sp(stack, d).state = State::RepIni;
+                    }
                 }
 
-                if can_go_deeper(&stack, d, SCORE_SWAP, maxscore) {
-                    stack[d].state = State::Unswap;
+                State::Unswap => {
+                    let fidx = sp(stack, d).fidx;
+                    let c1 = fword[fidx];
+                    let c2 = fword[fidx + 1];
                     fword[fidx] = c2;
                     fword[fidx + 1] = c1;
-                    go_deeper(&mut stack, d, SCORE_SWAP);
-                    depth += 1;
-                    stack[depth as usize].fidxtry = stack[d].fidx + 2;
-                } else {
-                    stack[d].state = State::RepIni;
-                }
-            }
-
-            State::Unswap => {
-                let fidx = stack[d].fidx;
-                let c1 = fword[fidx];
-                let c2 = fword[fidx + 1];
-                fword[fidx] = c2;
-                fword[fidx + 1] = c1;
-                stack[d].state = State::Swap3;
-            }
-
-            State::Swap3 => {
-                let fidx = stack[d].fidx;
-                if fidx + 2 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
-                    stack[d].state = State::RepIni;
-                    continue;
+                    sp(stack, d).state = State::Swap3;
                 }
 
-                let c1 = fword[fidx];
-                let c3 = fword[fidx + 2];
-
-                if c1 == c3 {
-                    stack[d].state = State::RepIni;
-                    continue;
-                }
-
-                if can_go_deeper(&stack, d, SCORE_SWAP3, maxscore) {
-                    stack[d].state = State::Unswap3;
-                    fword[fidx] = c3;
-                    fword[fidx + 2] = c1;
-                    go_deeper(&mut stack, d, SCORE_SWAP3);
-                    depth += 1;
-                    stack[depth as usize].fidxtry = stack[d].fidx + 3;
-                } else {
-                    stack[d].state = State::RepIni;
-                }
-            }
-
-            State::Unswap3 => {
-                let fidx = stack[d].fidx;
-                let c1 = fword[fidx];
-                let c3 = fword[fidx + 2];
-                fword[fidx] = c3;
-                fword[fidx + 2] = c1;
-
-                if fidx + 2 < eff_fword_len {
-                    stack[d].state = State::Rot3l;
-                } else {
-                    stack[d].state = State::RepIni;
-                }
-            }
-
-            State::Rot3l => {
-                let fidx = stack[d].fidx;
-                if can_go_deeper(&stack, d, SCORE_SWAP3, maxscore) {
-                    stack[d].state = State::UnRot3l;
-                    let a = fword[fidx];
-                    let b = fword[fidx + 1];
-                    let c = fword[fidx + 2];
-                    fword[fidx] = b;
-                    fword[fidx + 1] = c;
-                    fword[fidx + 2] = a;
-                    go_deeper(&mut stack, d, SCORE_SWAP3);
-                    depth += 1;
-                    stack[depth as usize].fidxtry = stack[d].fidx + 3;
-                } else {
-                    stack[d].state = State::RepIni;
-                }
-            }
-
-            State::UnRot3l => {
-                let fidx = stack[d].fidx;
-                let b = fword[fidx];
-                let c = fword[fidx + 1];
-                let a = fword[fidx + 2];
-                fword[fidx] = a;
-                fword[fidx + 1] = b;
-                fword[fidx + 2] = c;
-
-                stack[d].state = State::Rot3r;
-            }
-
-            State::Rot3r => {
-                let fidx = stack[d].fidx;
-                if can_go_deeper(&stack, d, SCORE_SWAP3, maxscore) {
-                    stack[d].state = State::UnRot3r;
-                    let a = fword[fidx];
-                    let b = fword[fidx + 1];
-                    let c = fword[fidx + 2];
-                    fword[fidx] = c;
-                    fword[fidx + 1] = a;
-                    fword[fidx + 2] = b;
-                    go_deeper(&mut stack, d, SCORE_SWAP3);
-                    depth += 1;
-                    stack[depth as usize].fidxtry = stack[d].fidx + 3;
-                } else {
-                    stack[d].state = State::RepIni;
-                }
-            }
-
-            State::UnRot3r => {
-                let fidx = stack[d].fidx;
-                let c = fword[fidx];
-                let a = fword[fidx + 1];
-                let b = fword[fidx + 2];
-                fword[fidx] = a;
-                fword[fidx + 1] = b;
-                fword[fidx + 2] = c;
-
-                stack[d].state = State::RepIni;
-            }
-
-            State::RepIni => {
-                if dict.rep.is_empty()
-                    || stack[d].score + SCORE_REP >= maxscore
-                    || stack[d].fidx < stack[d].fidxtry
-                {
-                    stack[d].state = State::Final;
-                    continue;
-                }
-
-                let fidx = stack[d].fidx;
-                if fidx >= eff_fword_len {
-                    stack[d].state = State::Final;
-                    continue;
-                }
-
-                let first = dict.rep_first[fword[fidx] as usize];
-                if first < 0 {
-                    stack[d].state = State::Final;
-                    continue;
-                }
-
-                stack[d].curi = first as i16;
-                stack[d].state = State::Rep;
-            }
-
-            State::Rep => {
-                let fidx = stack[d].fidx;
-                let curi = stack[d].curi as usize;
-
-                if curi >= dict.rep.len() {
-                    stack[d].state = State::Final;
-                    continue;
-                }
-
-                let from_len = dict.rep[curi].from.len();
-                let to_len = dict.rep[curi].to.len();
-                let first_byte = dict.arena[dict.rep[curi].from][0];
-
-                if first_byte != fword[fidx] {
-                    stack[d].state = State::Final;
-                    continue;
-                }
-
-                stack[d].curi += 1;
-
-                if (fidx as usize) + from_len > eff_fword_len as usize {
-                    continue;
-                }
-
-                let from_bytes = &dict.arena[dict.rep[curi].from];
-                if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
-                    continue;
-                }
-
-                if !can_go_deeper(&stack, d, SCORE_REP, maxscore) {
-                    continue;
-                }
-
-                let to_bytes = &dict.arena[dict.rep[curi].to];
-
-                stack[d].state = State::RepUndo;
-
-                if from_len != to_len {
-                    let fidx = fidx as usize;
-                    let tail_start = fidx + from_len;
-                    let tail_end = eff_fword_len as usize;
-                    if tail_start <= tail_end && fidx + to_len + (tail_end - tail_start) < MAXWLEN {
-                        fword.0.copy_within(tail_start..tail_end, fidx + to_len);
-                        repextra += to_len as i32 - from_len as i32;
-                        eff_fword_len = (fword_len as i32 + repextra) as u8;
-                    } else {
+                State::Swap3 => {
+                    let fidx = sp(stack, d).fidx;
+                    if fidx + 2 >= eff_fword_len || sp(stack, d).fidx < sp(stack, d).fidxtry {
+                        sp(stack, d).state = State::RepIni;
                         continue;
                     }
+
+                    let c1 = fword[fidx];
+                    let c3 = fword[fidx + 2];
+
+                    if c1 == c3 {
+                        sp(stack, d).state = State::RepIni;
+                        continue;
+                    }
+
+                    if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
+                        sp(stack, d).state = State::Unswap3;
+                        fword[fidx] = c3;
+                        fword[fidx + 2] = c1;
+                        let prev_fidx = sp(stack, d).fidx;
+                        go_deeper(stack, d, SCORE_SWAP3);
+                        depth += 1;
+                        sp(stack, depth as usize).fidxtry = prev_fidx + 3;
+                    } else {
+                        sp(stack, d).state = State::RepIni;
+                    }
                 }
-                let fidx = fidx as usize;
-                fword.0[fidx..fidx + to_len].copy_from_slice(&to_bytes);
 
-                go_deeper(&mut stack, d, SCORE_REP);
-                depth += 1;
-                stack[depth as usize].fidxtry = (fidx + to_len) as u8;
-            }
+                State::Unswap3 => {
+                    let fidx = sp(stack, d).fidx;
+                    let c1 = fword[fidx];
+                    let c3 = fword[fidx + 2];
+                    fword[fidx] = c3;
+                    fword[fidx + 2] = c1;
 
-            State::RepUndo => {
-                let fidx = stack[d].fidx as usize;
-                let curi = (stack[d].curi - 1) as usize;
+                    if fidx + 2 < eff_fword_len {
+                        sp(stack, d).state = State::Rot3l;
+                    } else {
+                        sp(stack, d).state = State::RepIni;
+                    }
+                }
 
-                if curi < dict.rep.len() {
+                State::Rot3l => {
+                    let fidx = sp(stack, d).fidx;
+                    if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
+                        sp(stack, d).state = State::UnRot3l;
+                        let a = fword[fidx];
+                        let b = fword[fidx + 1];
+                        let c = fword[fidx + 2];
+                        fword[fidx] = b;
+                        fword[fidx + 1] = c;
+                        fword[fidx + 2] = a;
+                        let prev_fidx = sp(stack, d).fidx;
+                        go_deeper(stack, d, SCORE_SWAP3);
+                        depth += 1;
+                        sp(stack, depth as usize).fidxtry = prev_fidx + 3;
+                    } else {
+                        sp(stack, d).state = State::RepIni;
+                    }
+                }
+
+                State::UnRot3l => {
+                    let fidx = sp(stack, d).fidx;
+                    let b = fword[fidx];
+                    let c = fword[fidx + 1];
+                    let a = fword[fidx + 2];
+                    fword[fidx] = a;
+                    fword[fidx + 1] = b;
+                    fword[fidx + 2] = c;
+
+                    sp(stack, d).state = State::Rot3r;
+                }
+
+                State::Rot3r => {
+                    let fidx = sp(stack, d).fidx;
+                    if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
+                        sp(stack, d).state = State::UnRot3r;
+                        let a = fword[fidx];
+                        let b = fword[fidx + 1];
+                        let c = fword[fidx + 2];
+                        fword[fidx] = c;
+                        fword[fidx + 1] = a;
+                        fword[fidx + 2] = b;
+                        let prev_fidx = sp(stack, d).fidx;
+                        go_deeper(stack, d, SCORE_SWAP3);
+                        depth += 1;
+                        sp(stack, depth as usize).fidxtry = prev_fidx + 3;
+                    } else {
+                        sp(stack, d).state = State::RepIni;
+                    }
+                }
+
+                State::UnRot3r => {
+                    let fidx = sp(stack, d).fidx;
+                    let c = fword[fidx];
+                    let a = fword[fidx + 1];
+                    let b = fword[fidx + 2];
+                    fword[fidx] = a;
+                    fword[fidx + 1] = b;
+                    fword[fidx + 2] = c;
+
+                    sp(stack, d).state = State::RepIni;
+                }
+
+                State::RepIni => {
+                    if dict.rep.is_empty()
+                        || sp(stack, d).score + SCORE_REP >= maxscore
+                        || sp(stack, d).fidx < sp(stack, d).fidxtry
+                    {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    let fidx = sp(stack, d).fidx;
+                    if fidx >= eff_fword_len {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    let first = dict.rep_first[fword[fidx] as usize];
+                    if first < 0 {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    sp(stack, d).curi = first as i16;
+                    sp(stack, d).state = State::Rep;
+                }
+
+                State::Rep => {
+                    let fidx = sp(stack, d).fidx;
+                    let curi = sp(stack, d).curi as usize;
+
+                    if curi >= dict.rep.len() {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
                     let from_len = dict.rep[curi].from.len();
                     let to_len = dict.rep[curi].to.len();
+                    let first_byte = dict.arena[dict.rep[curi].from][0];
+
+                    if first_byte != fword[fidx] {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    sp(stack, d).curi += 1;
+
+                    if (fidx as usize) + from_len > eff_fword_len as usize {
+                        continue;
+                    }
+
                     let from_bytes = &dict.arena[dict.rep[curi].from];
+                    if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
+                        continue;
+                    }
+
+                    if !can_go_deeper(stack, d, SCORE_REP, maxscore) {
+                        continue;
+                    }
+
+                    let to_bytes = &dict.arena[dict.rep[curi].to];
+
+                    sp(stack, d).state = State::RepUndo;
 
                     if from_len != to_len {
-                        let tail_start = fidx + to_len;
+                        let fidx = fidx as usize;
+                        let tail_start = fidx + from_len;
                         let tail_end = eff_fword_len as usize;
-                        if tail_start <= tail_end {
-                            fword.0.copy_within(tail_start..tail_end, fidx + from_len);
-                            repextra -= to_len as i32 - from_len as i32;
+                        if tail_start <= tail_end
+                            && fidx + to_len + (tail_end - tail_start) < MAXWLEN
+                        {
+                            fword.0.copy_within(tail_start..tail_end, fidx + to_len);
+                            repextra += to_len as i32 - from_len as i32;
                             eff_fword_len = (fword_len as i32 + repextra) as u8;
+                        } else {
+                            continue;
                         }
                     }
                     let fidx = fidx as usize;
-                    fword.0[fidx..fidx + from_len].copy_from_slice(&from_bytes);
+                    fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
+
+                    go_deeper(stack, d, SCORE_REP);
+                    depth += 1;
+                    sp(stack, depth as usize).fidxtry = (fidx + to_len) as u8;
                 }
 
-                stack[d].state = State::Rep;
-            }
+                State::RepUndo => {
+                    let fidx = sp(stack, d).fidx as usize;
+                    let curi = (sp(stack, d).curi - 1) as usize;
 
-            State::Final => {
-                if depth == 0 {
-                    break;
+                    if curi < dict.rep.len() {
+                        let from_len = dict.rep[curi].from.len();
+                        let to_len = dict.rep[curi].to.len();
+                        let from_bytes = &dict.arena[dict.rep[curi].from];
+
+                        if from_len != to_len {
+                            let tail_start = fidx + to_len;
+                            let tail_end = eff_fword_len as usize;
+                            if tail_start <= tail_end {
+                                fword.0.copy_within(tail_start..tail_end, fidx + from_len);
+                                repextra -= to_len as i32 - from_len as i32;
+                                eff_fword_len = (fword_len as i32 + repextra) as u8;
+                            }
+                        }
+                        fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
+                    }
+
+                    sp(stack, d).state = State::Rep;
                 }
-                depth -= 1;
+
+                State::Final => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
             }
         }
     }

@@ -9,8 +9,9 @@ fn main() {
         "compound-info" => show_compound_info(),
         "compound-words" => dump_compound_words(),
         "check" => spell_check(),
+        "profile" => profile_suggestions(),
         _ => {
-            eprintln!("Usage: vim-spell [compound-info|compound-words|check]");
+            eprintln!("Usage: vim-spell [compound-info|compound-words|check|profile]");
             std::process::exit(1);
         }
     }
@@ -57,6 +58,25 @@ fn dump_compound_words() {
         }
     });
     eprintln!("Total words with compound flags: {}", count);
+}
+
+fn profile_suggestions() {
+    let dict = load_dict();
+    let typos: &[&[u8]] = &[
+        b"sampl", b"hte", b"teh", b"helllo", b"helo", b"inthe", b"wrold", b"fone",
+        b"accomodation", b"definately", b"occured", b"recieve", b"seperate", b"untill", b"wich",
+        b"becuase", b"thier", b"foriegn",
+    ];
+
+    for _ in 0..20 {
+        for &typo_word in typos {
+            let t = vim_spell::Typo {
+                start: 0,
+                end: typo_word.len() as u32,
+            };
+            std::hint::black_box(dict.suggestions(&t, typo_word));
+        }
+    }
 }
 
 fn spell_check() {

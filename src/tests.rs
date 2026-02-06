@@ -1005,11 +1005,16 @@ fn test_map_similar_chars() {
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
     };
-    assert!(!dict.similar_chars(b'a', b'e'));
-    assert!(!dict.similar_chars(b'x', b'y'));
+    let m = &dict.map.as_ref().unwrap().map_array;
+    // 'a' and 'e' have different group IDs, so not similar
+    assert!(m[b'a' as usize] != m[b'e' as usize] || m[b'a' as usize] == 0);
+    // 'x' and 'y' both 0, so not similar
+    assert_eq!(m[b'x' as usize], 0);
 
     dict.map.as_mut().unwrap().map_array[b'e' as usize] = b'a' as u32;
-    assert!(dict.similar_chars(b'a', b'e'));
+    let m = &dict.map.as_ref().unwrap().map_array;
+    // Now 'a' and 'e' share the same non-zero group ID
+    assert!(m[b'a' as usize] != 0 && m[b'a' as usize] == m[b'e' as usize]);
 }
 
 #[test]
@@ -1306,4 +1311,31 @@ fn test_suggest_insertion() {
             .map(|s| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+#[ignore]
+fn bench_suggest_perf() {
+    let dict = load_dict();
+    let typos: &[&[u8]] = &[
+        b"sampl", b"hte", b"teh", b"helllo", b"helo", b"inthe", b"wrold", b"fone",
+        b"accomodation", b"definately", b"occured", b"recieve", b"seperate", b"untill", b"wich",
+        b"becuase", b"thier", b"foriegn",
+    ];
+
+    for &typo_word in typos {
+        let t = Typo {
+            start: 0,
+            end: typo_word.len() as u32,
+        };
+        let start = std::time::Instant::now();
+        let suggestions = dict.suggestions(&t, typo_word);
+        let elapsed = start.elapsed();
+        eprintln!(
+            "{:<20} {:>2} suggestions  {:>8.3} ms",
+            std::str::from_utf8(typo_word).unwrap(),
+            suggestions.len(),
+            elapsed.as_secs_f64() * 1000.0,
+        );
+    }
 }
