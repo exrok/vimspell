@@ -1227,3 +1227,83 @@ fn test_score_wordcount_adj_thresholds() {
     // bonus clamped to 0
     assert_eq!(dict.score_wordcount_adj(20, b"high"), 0);
 }
+
+#[test]
+fn test_suggest_swap() {
+    let dict = load_dict();
+    let input = b"hte";
+    let typo = Typo { start: 0, end: 3 };
+    let suggestions = dict.suggestions(&typo, input);
+    assert!(
+        suggestions.iter().any(|s| s == b"the"),
+        "should suggest 'the' for 'hte' via swap, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_suggest_multi_edit() {
+    let dict = load_dict();
+    let input = b"teh";
+    let typo = Typo { start: 0, end: 3 };
+    let suggestions = dict.suggestions(&typo, input);
+    assert!(
+        suggestions.iter().any(|s| s == b"the"),
+        "should suggest 'the' for 'teh' via multi-edit, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_suggest_word_split() {
+    let dict = load_dict();
+    let input = b"inthe";
+    let typo = Typo { start: 0, end: 5 };
+    let suggestions = dict.suggestions(&typo, input);
+    assert!(
+        suggestions.iter().any(|s| s == b"in the"),
+        "should suggest 'in the' for 'inthe' via split, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_suggest_deletion() {
+    let dict = load_dict();
+    let input = b"helllo";
+    let typo = Typo { start: 0, end: 6 };
+    let suggestions = dict.suggestions(&typo, input);
+    assert!(
+        suggestions.iter().any(|s| s == b"hello"),
+        "should suggest 'hello' for 'helllo' via deletion, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_suggest_insertion() {
+    let dict = load_dict();
+    let input = b"helo";
+    let typo = Typo { start: 0, end: 4 };
+    let suggestions = dict.suggestions(&typo, input);
+    assert!(
+        suggestions.iter().any(|s| s == b"hello"),
+        "should suggest 'hello' for 'helo' via insertion, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}

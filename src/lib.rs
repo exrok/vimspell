@@ -1,6 +1,9 @@
 //! # vim-spell: High performance spell-check with vim's spl dictionary support.
+
+use hashbrown::HashMap;
 mod parser;
 mod soundfold;
+mod suggest;
 #[cfg(test)]
 mod tests;
 
@@ -33,10 +36,18 @@ const SAL_REM_ACCENTS: u8 = 4;
 const SCORE_SIMILAR: i32 = 33;
 const SCORE_REP: i32 = 65;
 const SCORE_SWAP: i32 = 75;
+const SCORE_SWAP3: i32 = 110;
 const SCORE_SUBST: i32 = 93;
 const SCORE_DEL: i32 = 94;
+const SCORE_DELDUP: i32 = 66;
 const SCORE_INS: i32 = 96;
+const SCORE_INSDUP: i32 = 67;
+const SCORE_SPLIT: i32 = 149;
+#[allow(dead_code)]
+const SCORE_ICASE: i32 = 52;
+const SCORE_RARE: i32 = 180;
 const SCORE_REGION: i32 = 200;
+const SCORE_MAXINIT: i32 = 350;
 const SCORE_MAXMAX: i32 = 999999;
 
 const SCORE_COMMON1: i32 = 30;
@@ -100,9 +111,9 @@ pub enum ParseError {
     UnknownRequiredSection,
 }
 
-struct WordTree {
-    byts: Vec<u8>,
-    idxs: Vec<u32>,
+pub(crate) struct WordTree {
+    pub(crate) byts: Vec<u8>,
+    pub(crate) idxs: Vec<u32>,
 }
 
 struct SyllableItem {
@@ -329,7 +340,7 @@ impl WordTree {
     }
 }
 
-struct CharFlags {
+pub(crate) struct CharFlags {
     flags: [u8; 256],
     foldchars: [u8; 256],
 }
@@ -354,7 +365,7 @@ impl CharFlags {
         Self { flags, foldchars }
     }
 
-    fn is_word_char(&self, b: u8) -> bool {
+    pub(crate) fn is_word_char(&self, b: u8) -> bool {
         self.flags[b as usize] & CF_WORD != 0
     }
 
@@ -362,7 +373,7 @@ impl CharFlags {
         self.flags[b as usize] & CF_UPPER != 0
     }
 
-    fn fold(&self, b: u8) -> u8 {
+    pub(crate) fn fold(&self, b: u8) -> u8 {
         self.foldchars[b as usize]
     }
 }
@@ -392,9 +403,9 @@ impl std::ops::Index<Bytes> for Arena {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Bytes {
-    start: u32,
-    len: u32,
+pub(crate) struct Bytes {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
 }
 
 impl Bytes {
@@ -427,7 +438,7 @@ impl Default for CommonWordEntry {
     }
 }
 
-struct CommonWords {
+pub(crate) struct CommonWords {
     entries: Vec<CommonWordEntry>,
     mask: u32,
 }
@@ -455,7 +466,7 @@ impl CommonWords {
         }
     }
 
-    fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
+    pub(crate) fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
         if self.entries.is_empty() {
             return 0;
         }
@@ -542,15 +553,15 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
     true
 }
 
-struct MapInfo {
-    map_array: [u32; 256],
+pub(crate) struct MapInfo {
+    pub(crate) map_array: [u32; 256],
     #[allow(dead_code)]
     map_hash: Vec<(char, u32)>,
 }
 
-struct RepItem {
-    from: Bytes,
-    to: Bytes,
+pub(crate) struct RepItem {
+    pub(crate) from: Bytes,
+    pub(crate) to: Bytes,
 }
 
 struct SalItem {
@@ -571,13 +582,13 @@ struct SalInfo {
 
 /// A loaded spell dictionary.
 pub struct Dictionary {
-    arena: Arena,
-    foldtree: WordTree,
+    pub(crate) arena: Arena,
+    pub(crate) foldtree: WordTree,
     keeptree: WordTree,
     prefixtree: WordTree,
-    charflags: CharFlags,
+    pub(crate) charflags: CharFlags,
     regions: Vec<[u8; 2]>,
-    region: u8,
+    pub(crate) region: u8,
     #[allow(dead_code)]
     midword: Bytes,
     prefcond: Vec<Bytes>,
@@ -592,12 +603,12 @@ pub struct Dictionary {
     #[allow(dead_code)]
     nobreak: bool,
     sal: Option<SalInfo>,
-    map: Option<MapInfo>,
-    rep: Vec<RepItem>,
-    rep_first: [i16; 256],
+    pub(crate) map: Option<MapInfo>,
+    pub(crate) rep: Vec<RepItem>,
+    pub(crate) rep_first: [i16; 256],
     repsal: Vec<RepItem>,
     repsal_first: [i16; 256],
-    common_words: CommonWords,
+    pub(crate) common_words: CommonWords,
 }
 
 /// A detected typo with position information.
@@ -682,7 +693,7 @@ impl Dictionary {
         !self.common_words.is_empty()
     }
 
-    fn similar_chars(&self, c1: u8, c2: u8) -> bool {
+    pub(crate) fn similar_chars(&self, c1: u8, c2: u8) -> bool {
         let Some(map) = &self.map else {
             return false;
         };
@@ -693,7 +704,7 @@ impl Dictionary {
         m1 == map.map_array[c2 as usize]
     }
 
-    fn score_wordcount_adj(&self, score: i32, word: &[u8]) -> i32 {
+    pub(crate) fn score_wordcount_adj(&self, score: i32, word: &[u8]) -> i32 {
         let count = self.common_words.lookup(&self.arena, word);
         if count == 0 {
             return score;
@@ -725,119 +736,15 @@ impl Dictionary {
             return Vec::new();
         }
 
-        // Track (candidate, edit_score) pairs.
-        let mut scored: Vec<(Vec<u8>, i32)> = Vec::new();
-        let mut candidate = [0u8; MAXWLEN + 1];
+        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
         let word_len = word.len();
 
-        let add_candidate = |scored: &mut Vec<(Vec<u8>, i32)>, cand: &[u8], edit_score: i32| {
-            if !scored.iter().any(|(s, _)| s.as_slice() == cand) {
-                scored.push((cand.to_vec(), edit_score));
-            }
-        };
-
-        // Returns the region penalty for a word result, or None if rejected.
-        let region_penalty = |result: &WordResult| -> Option<i32> {
-            match result {
-                WordResult::Valid => Some(0),
-                WordResult::WrongRegion => Some(SCORE_REGION),
-                _ => None,
-            }
-        };
-
-        // Try single-character substitutions.
-        candidate[..word_len].copy_from_slice(word);
-        for i in 0..word_len {
-            let original = candidate[i];
-            for c in b'a'..=b'z' {
-                if c == original {
-                    continue;
-                }
-                candidate[i] = c;
-                let result = self.check_word_internal(&candidate[..word_len]);
-                if let Some(penalty) = region_penalty(&result) {
-                    let base = if self.similar_chars(original, c) {
-                        SCORE_SIMILAR
-                    } else {
-                        SCORE_SUBST
-                    };
-                    add_candidate(&mut scored, &candidate[..word_len], base + penalty);
-                }
-            }
-            candidate[i] = original;
+        let mut fword = [0u8; MAXWLEN];
+        for (i, &b) in word.iter().enumerate() {
+            fword[i] = self.charflags.fold(b);
         }
 
-        // Try single-character deletions.
-        if word_len > 1 {
-            for i in 0..word_len {
-                candidate[..i].copy_from_slice(&word[..i]);
-                candidate[i..word_len - 1].copy_from_slice(&word[i + 1..]);
-                let result = self.check_word_internal(&candidate[..word_len - 1]);
-                if let Some(penalty) = region_penalty(&result) {
-                    add_candidate(&mut scored, &candidate[..word_len - 1], SCORE_DEL + penalty);
-                }
-            }
-        }
-
-        // Try single-character insertions.
-        for i in 0..=word_len {
-            candidate[..i].copy_from_slice(&word[..i]);
-            candidate[i + 1..=word_len].copy_from_slice(&word[i..]);
-            for c in b'a'..=b'z' {
-                candidate[i] = c;
-                let result = self.check_word_internal(&candidate[..word_len + 1]);
-                if let Some(penalty) = region_penalty(&result) {
-                    add_candidate(&mut scored, &candidate[..word_len + 1], SCORE_INS + penalty);
-                }
-            }
-        }
-
-        // Try adjacent character transpositions.
-        if word_len >= 2 {
-            candidate[..word_len].copy_from_slice(word);
-            for i in 0..word_len - 1 {
-                candidate.swap(i, i + 1);
-                let result = self.check_word_internal(&candidate[..word_len]);
-                if let Some(penalty) = region_penalty(&result) {
-                    add_candidate(&mut scored, &candidate[..word_len], SCORE_SWAP + penalty);
-                }
-                candidate.swap(i, i + 1);
-            }
-        }
-
-        // Try REP replacements from the .aff file.
-        if !self.rep.is_empty() {
-            let mut buf = [0u8; MAXWLEN * 2];
-            for i in 0..word_len {
-                let first = self.rep_first[word[i] as usize];
-                if first < 0 {
-                    continue;
-                }
-                let mut ri = first as usize;
-                while ri < self.rep.len() {
-                    let item = &self.rep[ri];
-                    let from = &self.arena[item.from];
-                    if from[0] != word[i] {
-                        break;
-                    }
-                    if i + from.len() <= word_len && word[i..i + from.len()] == *from {
-                        let to = &self.arena[item.to];
-                        let new_len = word_len - from.len() + to.len();
-                        if new_len <= MAXWLEN {
-                            buf[..i].copy_from_slice(&word[..i]);
-                            buf[i..i + to.len()].copy_from_slice(to);
-                            buf[i + to.len()..new_len]
-                                .copy_from_slice(&word[i + from.len()..word_len]);
-                            let result = self.check_word_internal(&buf[..new_len]);
-                            if let Some(penalty) = region_penalty(&result) {
-                                add_candidate(&mut scored, &buf[..new_len], SCORE_REP + penalty);
-                            }
-                        }
-                    }
-                    ri += 1;
-                }
-            }
-        }
+        suggest::suggest_trie_walk(self, &mut fword, word_len, &mut scored, SCORE_MAXINIT);
 
         // Rescore using sound similarity if SAL data is available.
         if self.sal.is_some() {
@@ -910,7 +817,20 @@ impl Dictionary {
                 *score = self.score_wordcount_adj(*score, cand_word);
             }
         }
-
+        // let mut top_ten_scores = [0i32; 10];
+        // if scored.len() > 15 {
+        //     for score in scored.values() {
+        //         for s in &mut top_ten_scores {
+        //             if *s < *score {
+        //                 *s = *score;
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }
+        // todo optimize top ten top ten
+        // println!("{:#?}", scored);
+        let mut scored: Vec<_> = scored.into_iter().collect();
         scored.sort_by_key(|(_, s)| *s);
         scored.truncate(10);
         scored.into_iter().map(|(w, _)| w).collect()

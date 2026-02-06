@@ -607,7 +607,10 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
         }
     }
 
-    Ok(MapInfo { map_array, map_hash })
+    Ok(MapInfo {
+        map_array,
+        map_hash,
+    })
 }
 
 fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseError> {
