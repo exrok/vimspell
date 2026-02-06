@@ -96,7 +96,7 @@ fn profile_suggestions() {
 
 fn spell_check() {
     let dict = load_dict();
-    let input = b"This is a sampl text with a typo.";
+    let input = b"This is a sampl text with an accomodation typo.";
 
     for typo in dict.spell_check(input) {
         let word = typo.word(input);

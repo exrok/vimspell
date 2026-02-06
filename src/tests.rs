@@ -975,9 +975,7 @@ fn test_map_similar_chars() {
     let mut map_array = [0u32; 256];
     map_array[b'a' as usize] = b'a' as u32;
     map_array[b'e' as usize] = b'e' as u32;
-    let map = MapInfo {
-        map_array,
-    };
+    let map = MapInfo { map_array };
     let mut dict = Dictionary {
         arena: Arena::default(),
         foldtree: WordTree::new(),
@@ -1032,9 +1030,7 @@ fn test_map_similar_substitution_score() {
     let mut map_array = [0u32; 256];
     map_array[b'r' as usize] = b'r' as u32;
     map_array[b't' as usize] = b'r' as u32;
-    let map = MapInfo {
-        map_array,
-    };
+    let map = MapInfo { map_array };
 
     let dict = Dictionary {
         arena,
@@ -1366,7 +1362,10 @@ fn debug_inthe_deep_scoring() {
     };
     let results = dict.suggestions_debug(&t, typo_word);
 
-    println!("=== Rust deep ranking for 'inthe' ({} candidates) ===", results.len());
+    println!(
+        "=== Rust deep ranking for 'inthe' ({} candidates) ===",
+        results.len()
+    );
     for (i, (word, pre_sal, sal, final_score)) in results.iter().enumerate() {
         let w = std::str::from_utf8(word).unwrap_or("???");
         let marker = match w {

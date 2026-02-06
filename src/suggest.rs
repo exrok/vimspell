@@ -329,11 +329,11 @@ fn build_cased_word(
     word_flags: u32,
     out: &mut Vec<u8>,
 ) {
-    if word_flags as u8 & WF_KEEPCAP != 0 {
-        if let Some(kw) = find_keepcap_word(keeptree, word) {
-            out.extend_from_slice(&kw);
-            return;
-        }
+    if word_flags as u8 & WF_KEEPCAP != 0
+        && let Some(kw) = find_keepcap_word(keeptree, word)
+    {
+        out.extend_from_slice(&kw);
+        return;
     }
     apply_case(out, word, badflags, word_flags);
 }
@@ -580,10 +580,11 @@ pub(crate) fn suggest_trie_walk(
                     stack[sd].tword_len += 1;
                     stack[sd].arridx = idxs[idx];
 
-                    if newscore == SCORE_SUBST && fidx < eff_fword_len {
-                        if similar_chars(map_array, fword[fidx], c) {
-                            stack[sd].score -= SCORE_SUBST - SCORE_SIMILAR;
-                        }
+                    if newscore == SCORE_SUBST
+                        && fidx < eff_fword_len
+                        && similar_chars(map_array, fword[fidx], c)
+                    {
+                        stack[sd].score -= SCORE_SUBST - SCORE_SIMILAR;
                     }
                 }
             }
@@ -738,23 +739,23 @@ pub(crate) fn suggest_trie_walk(
                 fword[fidx] = c3;
                 fword[fidx + 2] = c1;
 
-                if fidx + 2 < eff_fword_len {
-                    if can_go_deeper(&mut stack, depth, SCORE_SWAP3, maxscore) {
-                        state = State::UnRot3l;
-                        stack[d].state = state;
-                        let a = fword[fidx];
-                        let b = fword[fidx + 1];
-                        let c = fword[fidx + 2];
-                        fword[fidx] = b;
-                        fword[fidx + 1] = c;
-                        fword[fidx + 2] = a;
-                        let prev_fidx = stack[d].fidx;
-                        go_deeper(&mut stack, depth, SCORE_SWAP3);
-                        depth += 1;
-                        state = State::Start;
-                        stack[depth as usize].fidxtry = prev_fidx + 3;
-                        continue;
-                    }
+                if fidx + 2 < eff_fword_len
+                    && can_go_deeper(&mut stack, depth, SCORE_SWAP3, maxscore)
+                {
+                    state = State::UnRot3l;
+                    stack[d].state = state;
+                    let a = fword[fidx];
+                    let b = fword[fidx + 1];
+                    let c = fword[fidx + 2];
+                    fword[fidx] = b;
+                    fword[fidx + 1] = c;
+                    fword[fidx + 2] = a;
+                    let prev_fidx = stack[d].fidx;
+                    go_deeper(&mut stack, depth, SCORE_SWAP3);
+                    depth += 1;
+                    state = State::Start;
+                    stack[depth as usize].fidxtry = prev_fidx + 3;
+                    continue;
                 }
                 state = State::RepIni;
             }
@@ -820,7 +821,7 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                stack[d].curi = first as i16;
+                stack[d].curi = first;
                 state = State::Rep;
             }
 
@@ -928,7 +929,7 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                stack[d].curi = first as i16;
+                stack[d].curi = first;
                 state = State::Repsal;
             }
 

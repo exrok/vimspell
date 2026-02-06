@@ -241,10 +241,10 @@ impl CompoundRules {
     }
 
     fn skip_quantifier(&self, rule: &[u8], pos: &mut usize) {
-        if let Some(&c) = rule.get(*pos) {
-            if c == b'*' || c == b'+' || c == b'?' {
-                *pos += 1;
-            }
+        if let Some(&c) = rule.get(*pos)
+            && (c == b'*' || c == b'+' || c == b'?')
+        {
+            *pos += 1;
         }
     }
 
@@ -442,19 +442,10 @@ fn fnv1a(data: &[u8]) -> u32 {
     hash
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct CommonWordEntry {
     word: Bytes,
     count: u16,
-}
-
-impl Default for CommonWordEntry {
-    fn default() -> Self {
-        Self {
-            word: Bytes::default(),
-            count: 0,
-        }
-    }
 }
 
 pub(crate) struct CommonWords {
@@ -722,14 +713,17 @@ impl Dictionary {
     /// match this region. Pass a 2-byte region code (e.g., `b"us"`).
     /// If the region is not found in the dictionary, the region is set
     /// to [`REGION_ALL`] (accept all regions).
-    pub fn set_region(&mut self, region: &[u8; 2]) {
+    ///
+    /// Returns false, if region was unknown
+    pub fn set_region(&mut self, region: &[u8; 2]) -> bool {
         for (i, name) in self.regions.iter().enumerate() {
             if name == region {
                 self.region = 1 << i;
-                return;
+                return true;
             }
         }
         self.region = REGION_ALL;
+        return false;
     }
 
     /// Clear the active region, accepting words from all regions.
@@ -1107,11 +1101,7 @@ impl Dictionary {
             return false;
         }
 
-        let tree = if start_offset == 0 {
-            &self.foldtree
-        } else {
-            &self.foldtree
-        };
+        let tree = &self.foldtree;
 
         for end_pos in 1..=remaining.len() {
             let part = &remaining[..end_pos];
@@ -1172,10 +1162,10 @@ impl Dictionary {
 
                     if self.comp_sylmax < MAXWLEN as u8 {
                         let syl_count = self.syllable.count(&self.arena, word);
-                        if syl_count > self.comp_sylmax as usize {
-                            if comp_len + 1 >= self.comp_max as usize {
-                                continue;
-                            }
+                        if syl_count > self.comp_sylmax as usize
+                            && comp_len + 1 >= self.comp_max as usize
+                        {
+                            continue;
                         }
                     }
 
@@ -1257,13 +1247,12 @@ impl Dictionary {
                 if b != 0 {
                     break;
                 }
-                if wlen == word.len() {
-                    if let Some(&flags) = idxs.get(arridx + zero_count) {
-                        if result_count < out.len() {
-                            out[result_count] = flags;
-                            result_count += 1;
-                        }
-                    }
+                if wlen == word.len()
+                    && let Some(&flags) = idxs.get(arridx + zero_count)
+                    && result_count < out.len()
+                {
+                    out[result_count] = flags;
+                    result_count += 1;
                 }
                 zero_count += 1;
             }
@@ -1337,33 +1326,33 @@ impl Dictionary {
             let mut len = len_byte as usize;
             arridx += 1;
 
-            if let Some(&b) = byts.get(arridx) {
-                if b == 0 {
-                    let pref_arridx = arridx;
-                    let mut pref_count = 0usize;
-                    while pref_count < len {
-                        let Some(&pb) = byts.get(arridx + pref_count) else {
-                            break;
-                        };
-                        if pb != 0 {
-                            break;
-                        }
-                        pref_count += 1;
-                    }
-
-                    if wlen > 0 && wlen < folded.len() {
-                        let result = self.check_prefix_at(folded, wlen, pref_arridx, pref_count);
-                        if result != WordResult::NotFound {
-                            return result;
-                        }
-                    }
-
-                    arridx += pref_count;
-                    len -= pref_count;
-
-                    if len == 0 {
+            if let Some(&b) = byts.get(arridx)
+                && b == 0
+            {
+                let pref_arridx = arridx;
+                let mut pref_count = 0usize;
+                while pref_count < len {
+                    let Some(&pb) = byts.get(arridx + pref_count) else {
+                        break;
+                    };
+                    if pb != 0 {
                         break;
                     }
+                    pref_count += 1;
+                }
+
+                if wlen > 0 && wlen < folded.len() {
+                    let result = self.check_prefix_at(folded, wlen, pref_arridx, pref_count);
+                    if result != WordResult::NotFound {
+                        return result;
+                    }
+                }
+
+                arridx += pref_count;
+                len -= pref_count;
+
+                if len == 0 {
+                    break;
                 }
             }
 
@@ -1420,9 +1409,7 @@ impl Dictionary {
         let flags_count = self.find_word(&self.foldtree, remainder, &mut flags_buf);
         let mut wrong_region = false;
 
-        for fi in 0..flags_count {
-            let word_flags = flags_buf[fi];
-
+        for word_flags in &flags_buf[0..flags_count] {
             if word_flags & (WF_BANNED as u32) != 0 {
                 continue;
             }
@@ -1617,13 +1604,12 @@ impl<'a> SpellCheckIter<'a> {
                 // A midword character (e.g. apostrophe) continues the word only
                 // when followed by a word character: "they're" is one word, but a
                 // trailing apostrophe is not part of the word.
-                if self.dict.charflags.is_midword(b) {
-                    if let Some(&next) = self.input.get(self.pos + 1) {
-                        if self.dict.charflags.is_word_char(next) {
-                            self.pos += 1;
-                            continue;
-                        }
-                    }
+                if self.dict.charflags.is_midword(b)
+                    && let Some(&next) = self.input.get(self.pos + 1)
+                    && self.dict.charflags.is_word_char(next)
+                {
+                    self.pos += 1;
+                    continue;
                 }
                 break;
             }

@@ -437,10 +437,8 @@ fn read_compound(
                 comp_rules.all_flags.push(c);
             }
 
-            if at_start || in_bracket {
-                if !comp_rules.start_flags.contains(&c) {
-                    comp_rules.start_flags.push(c);
-                }
+            if (at_start || in_bracket) && !comp_rules.start_flags.contains(&c) {
+                comp_rules.start_flags.push(c);
             }
 
             if at_start && !in_bracket {
@@ -532,10 +530,9 @@ fn read_rep_section(
         });
     }
 
-    // Build first-byte index.
-    for i in 0..256 {
-        first[i] = -1;
-    }
+    // probably don't need this becaus parent initialized correctly
+    first.fill(-1);
+
     for (i, item) in items.iter().enumerate() {
         let b = a[item.from][0] as usize;
         if first[b] == -1 {
@@ -606,9 +603,7 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
         }
     }
 
-    Ok(MapInfo {
-        map_array,
-    })
+    Ok(MapInfo { map_array })
 }
 
 fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseError> {
@@ -683,17 +678,6 @@ fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseErr
         });
     }
 
-    // Add sentinel with empty lead.
-    items.push(SalItem {
-        lead: Vec::new(),
-        oneof: Vec::new(),
-        rules: Vec::new(),
-        to: Vec::new(),
-    });
-
-    // Build the first-byte index table.
-    // First, sort items (except sentinel) by low byte of first codepoint, stable.
-    let sentinel = items.pop().unwrap();
     items.sort_by_key(|item| {
         if let Some(&first) = item.lead.first() {
             (first as u32 & 0xff) as u16
@@ -701,7 +685,13 @@ fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseErr
             256u16 // empty lead goes to end
         }
     });
-    items.push(sentinel);
+
+    items.push(SalItem {
+        lead: Vec::new(),
+        oneof: Vec::new(),
+        rules: Vec::new(),
+        to: Vec::new(),
+    });
 
     let mut first = [-1i32; 256];
     for (i, item) in items.iter().enumerate() {
@@ -742,6 +732,7 @@ fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, Pars
 }
 
 const SHARED_MASK: u32 = 0x8000000;
+
 macro_rules! rtry {
     ($($tt:tt)*) => {
         match $($tt)* {

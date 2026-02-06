@@ -1,18 +1,11 @@
-use super::SCORE_INS;
-
-use super::SCORE_SUBST;
-
-use super::SCORE_SWAP;
-
-use super::SCORE_MAXMAX;
-
-use super::SCORE_DEL;
-
-use super::MAXWLEN;
-
-use super::SalInfo;
-
 use super::CharFlags;
+use super::MAXWLEN;
+use super::SCORE_DEL;
+use super::SCORE_INS;
+use super::SCORE_MAXMAX;
+use super::SCORE_SUBST;
+use super::SCORE_SWAP;
+use super::SalInfo;
 
 pub(crate) fn is_word_char_w(c: char, charflags: &CharFlags) -> bool {
     if (c as u32) < 256 {
@@ -286,12 +279,12 @@ pub(crate) fn soundfold_wsal(sal: &SalInfo, input: &[u8], charflags: &CharFlags)
                     i += k - 1;
                     z = false;
                     if !to.is_empty() {
-                        for ti in 0..to.len() - 1 {
+                        for c in &to[0..to.len() - 1] {
                             if wres.len() >= MAXWLEN {
                                 break;
                             }
-                            if wres.is_empty() || *wres.last().unwrap() != to[ti] {
-                                wres.push(to[ti]);
+                            if wres.is_empty() || *wres.last().unwrap() != *c {
+                                wres.push(*c);
                             }
                         }
                     }
@@ -379,7 +372,7 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
     let badlen = badsound.len() as i32;
 
     let n = goodlen - badlen;
-    if n < -2 || n > 2 {
+    if !(-2..=2).contains(&n) {
         return SCORE_MAXMAX;
     }
 

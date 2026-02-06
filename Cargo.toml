@@ -11,5 +11,4 @@ foldhash = "0.2"
 hashbrown = { version = "0.16.1", default-features = false, features = [
     "inline-more",
     "default-hasher",
-    # "equivalent",
 ] }
