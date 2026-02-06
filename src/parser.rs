@@ -208,6 +208,10 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let keeptree = read_wordtree(&mut r, false)?;
     let prefixtree = read_wordtree(&mut r, true)?;
 
+    if !midword.is_empty() {
+        charflags.apply_midword(&a[midword]);
+    }
+
     Ok(Dictionary {
         arena: a,
         foldtree,
@@ -216,7 +220,6 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
         charflags,
         regions,
         region: REGION_ALL,
-        midword,
         prefcond,
         comp_max,
         comp_minlen,
@@ -578,7 +581,6 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
     if len == 0 {
         return Ok(MapInfo {
             map_array: [0; 256],
-            map_hash: Vec::new(),
         });
     }
 
@@ -588,7 +590,6 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
     };
 
     let mut map_array = [0u32; 256];
-    let mut map_hash = Vec::new();
     let mut head: u32 = 0;
 
     for c in map_str.chars() {
@@ -602,14 +603,11 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
         let code = c as u32;
         if code < 256 {
             map_array[code as usize] = head;
-        } else {
-            map_hash.push((c, head));
         }
     }
 
     Ok(MapInfo {
         map_array,
-        map_hash,
     })
 }
 

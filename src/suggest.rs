@@ -47,6 +47,9 @@ enum State {
     RepIni,
     Rep,
     RepUndo,
+    RepsalIni,
+    Repsal,
+    RepsalUndo,
     Final,
 }
 
@@ -821,19 +824,19 @@ pub(crate) fn suggest_trie_walk(
                         || sp(stack, d).score + SCORE_REP >= maxscore
                         || sp(stack, d).fidx < sp(stack, d).fidxtry
                     {
-                        sp(stack, d).state = State::Final;
+                        sp(stack, d).state = State::RepsalIni;
                         continue;
                     }
 
                     let fidx = sp(stack, d).fidx;
                     if fidx >= eff_fword_len {
-                        sp(stack, d).state = State::Final;
+                        sp(stack, d).state = State::RepsalIni;
                         continue;
                     }
 
                     let first = dict.rep_first[fword[fidx] as usize];
                     if first < 0 {
-                        sp(stack, d).state = State::Final;
+                        sp(stack, d).state = State::RepsalIni;
                         continue;
                     }
 
@@ -846,7 +849,7 @@ pub(crate) fn suggest_trie_walk(
                     let curi = sp(stack, d).curi as usize;
 
                     if curi >= dict.rep.len() {
-                        sp(stack, d).state = State::Final;
+                        sp(stack, d).state = State::RepsalIni;
                         continue;
                     }
 
@@ -855,7 +858,7 @@ pub(crate) fn suggest_trie_walk(
                     let first_byte = dict.arena[dict.rep[curi].from][0];
 
                     if first_byte != fword[fidx] {
-                        sp(stack, d).state = State::Final;
+                        sp(stack, d).state = State::RepsalIni;
                         continue;
                     }
 
@@ -922,6 +925,114 @@ pub(crate) fn suggest_trie_walk(
                     }
 
                     sp(stack, d).state = State::Rep;
+                }
+
+                State::RepsalIni => {
+                    if dict.repsal.is_empty()
+                        || sp(stack, d).score + SCORE_REP >= maxscore
+                        || sp(stack, d).fidx < sp(stack, d).fidxtry
+                    {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    let fidx = sp(stack, d).fidx;
+                    if fidx >= eff_fword_len {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    let first = dict.repsal_first[fword[fidx] as usize];
+                    if first < 0 {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    sp(stack, d).curi = first as i16;
+                    sp(stack, d).state = State::Repsal;
+                }
+
+                State::Repsal => {
+                    let fidx = sp(stack, d).fidx;
+                    let curi = sp(stack, d).curi as usize;
+
+                    if curi >= dict.repsal.len() {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    let from_len = dict.repsal[curi].from.len();
+                    let to_len = dict.repsal[curi].to.len();
+                    let first_byte = dict.arena[dict.repsal[curi].from][0];
+
+                    if first_byte != fword[fidx] {
+                        sp(stack, d).state = State::Final;
+                        continue;
+                    }
+
+                    sp(stack, d).curi += 1;
+
+                    if (fidx as usize) + from_len > eff_fword_len as usize {
+                        continue;
+                    }
+
+                    let from_bytes = &dict.arena[dict.repsal[curi].from];
+                    if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
+                        continue;
+                    }
+
+                    if !can_go_deeper(stack, d, SCORE_REP, maxscore) {
+                        continue;
+                    }
+
+                    let to_bytes = &dict.arena[dict.repsal[curi].to];
+
+                    sp(stack, d).state = State::RepsalUndo;
+
+                    if from_len != to_len {
+                        let fidx = fidx as usize;
+                        let tail_start = fidx + from_len;
+                        let tail_end = eff_fword_len as usize;
+                        if tail_start <= tail_end
+                            && fidx + to_len + (tail_end - tail_start) < MAXWLEN
+                        {
+                            fword.0.copy_within(tail_start..tail_end, fidx + to_len);
+                            repextra += to_len as i32 - from_len as i32;
+                            eff_fword_len = (fword_len as i32 + repextra) as u8;
+                        } else {
+                            continue;
+                        }
+                    }
+                    let fidx = fidx as usize;
+                    fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
+
+                    go_deeper(stack, d, SCORE_REP);
+                    depth += 1;
+                    sp(stack, depth as usize).fidxtry = (fidx + to_len) as u8;
+                }
+
+                State::RepsalUndo => {
+                    let fidx = sp(stack, d).fidx as usize;
+                    let curi = (sp(stack, d).curi - 1) as usize;
+
+                    if curi < dict.repsal.len() {
+                        let from_len = dict.repsal[curi].from.len();
+                        let to_len = dict.repsal[curi].to.len();
+                        let from_bytes = &dict.arena[dict.repsal[curi].from];
+
+                        if from_len != to_len {
+                            let tail_start = fidx + to_len;
+                            let tail_end = eff_fword_len as usize;
+                            if tail_start <= tail_end {
+                                fword.0.copy_within(tail_start..tail_end, fidx + from_len);
+                                repextra -= to_len as i32 - from_len as i32;
+                                eff_fword_len = (fword_len as i32 + repextra) as u8;
+                            }
+                        }
+                        fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
+                    }
+
+                    sp(stack, d).state = State::Repsal;
                 }
 
                 State::Final => {

@@ -95,6 +95,7 @@ const COMP_CHECKTRIPLE: u8 = 8;
 
 const CF_WORD: u8 = 0x01;
 const CF_UPPER: u8 = 0x02;
+const CF_MIDWORD: u8 = 0x04;
 
 const BY_NOFLAGS: u8 = 0;
 const BY_INDEX: u8 = 1;
@@ -372,12 +373,22 @@ impl CharFlags {
         self.flags[b as usize] & CF_WORD != 0
     }
 
+    fn is_midword(&self, b: u8) -> bool {
+        self.flags[b as usize] & CF_MIDWORD != 0
+    }
+
     fn is_upper(&self, b: u8) -> bool {
         self.flags[b as usize] & CF_UPPER != 0
     }
 
     pub(crate) fn fold(&self, b: u8) -> u8 {
         self.foldchars[b as usize]
+    }
+
+    fn apply_midword(&mut self, midword_bytes: &[u8]) {
+        for &b in midword_bytes {
+            self.flags[b as usize] = (self.flags[b as usize] & !CF_WORD) | CF_MIDWORD;
+        }
     }
 }
 
@@ -562,7 +573,6 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
 
 pub(crate) struct MapInfo {
     pub(crate) map_array: [u32; 256],
-    map_hash: Vec<(char, u32)>,
 }
 
 pub(crate) struct RepItem {
@@ -594,11 +604,11 @@ pub struct Dictionary {
     pub(crate) charflags: CharFlags,
     regions: Vec<[u8; 2]>,
     pub(crate) region: u8,
-    midword: Bytes,
     prefcond: Vec<Bytes>,
     comp_max: u8,
     comp_minlen: u8,
     comp_sylmax: u8,
+    #[allow(dead_code)]
     comp_options: u8,
     comp_rules: CompoundRules,
     comp_patterns: Vec<(Bytes, Bytes)>,
@@ -609,8 +619,8 @@ pub struct Dictionary {
     pub(crate) map: Option<MapInfo>,
     pub(crate) rep: Vec<RepItem>,
     pub(crate) rep_first: [i16; 256],
-    repsal: Vec<RepItem>,
-    repsal_first: [i16; 256],
+    pub(crate) repsal: Vec<RepItem>,
+    pub(crate) repsal_first: [i16; 256],
     pub(crate) common_words: CommonWords,
 }
 
@@ -1603,6 +1613,17 @@ impl<'a> SpellCheckIter<'a> {
         while self.pos < self.input.len() {
             let b = self.input[self.pos];
             if !self.dict.charflags.is_word_char(b) {
+                // A midword character (e.g. apostrophe) continues the word only
+                // when followed by a word character: "they're" is one word, but a
+                // trailing apostrophe is not part of the word.
+                if self.dict.charflags.is_midword(b) {
+                    if let Some(&next) = self.input.get(self.pos + 1) {
+                        if self.dict.charflags.is_word_char(next) {
+                            self.pos += 1;
+                            continue;
+                        }
+                    }
+                }
                 break;
             }
             self.pos += 1;

@@ -260,7 +260,7 @@ fn build_prefix_dict() -> Dictionary {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond,
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -374,7 +374,7 @@ fn test_prefix_synthetic_with_condition() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond,
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -427,7 +427,7 @@ fn test_prefix_synthetic_rare_prefix() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: vec![Bytes::default()],
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -611,7 +611,7 @@ fn test_rep_suggestions() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -675,7 +675,7 @@ fn test_rep_score_is_low() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -776,7 +776,7 @@ fn test_region_filtering_synthetic() {
         charflags: CharFlags::new(),
         regions: vec![*b"us", *b"gb"],
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -834,7 +834,7 @@ fn test_region_wrong_region_result() {
         charflags: CharFlags::new(),
         regions: vec![*b"us", *b"gb"],
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -906,7 +906,7 @@ fn test_region_suggestions_penalty() {
         charflags: CharFlags::new(),
         regions: vec![*b"us", *b"gb"],
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -977,7 +977,6 @@ fn test_map_similar_chars() {
     map_array[b'e' as usize] = b'e' as u32;
     let map = MapInfo {
         map_array,
-        map_hash: Vec::new(),
     };
     let mut dict = Dictionary {
         arena: Arena::default(),
@@ -987,7 +986,7 @@ fn test_map_similar_chars() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -1035,7 +1034,6 @@ fn test_map_similar_substitution_score() {
     map_array[b't' as usize] = b'r' as u32;
     let map = MapInfo {
         map_array,
-        map_hash: Vec::new(),
     };
 
     let dict = Dictionary {
@@ -1046,7 +1044,7 @@ fn test_map_similar_substitution_score() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -1143,7 +1141,7 @@ fn test_common_words_suggestion_boost() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
@@ -1202,7 +1200,7 @@ fn test_score_wordcount_adj_thresholds() {
         charflags: CharFlags::new(),
         regions: Vec::new(),
         region: REGION_ALL,
-        midword: Bytes::default(),
+
         prefcond: Vec::new(),
         comp_max: MAXWLEN as u8,
         comp_minlen: 0,
