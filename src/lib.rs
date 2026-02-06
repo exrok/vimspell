@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # vim-spell: High performance spell-check with vim's spl dictionary support.
 
 use hashbrown::HashMap;
