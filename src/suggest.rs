@@ -388,20 +388,22 @@ pub(crate) fn suggest_trie_walk(
     //   trie node's allocated range in byts/idxs.
     // - `fidx` is bounded by depth + fword_len, always < 255.
     unsafe {
+        let mut state = State::Start;
         loop {
             let d = depth as usize;
-            match sp(stack, d).state {
+            match state {
                 State::Start => {
                     let arridx = sp(stack, d).arridx as usize;
                     if arridx >= byts_len {
                         depth -= 1;
+                        state = sp(stack, depth as usize).state;
                         continue;
                     }
                     let len = *byts.add(arridx) as i16;
                     let cur = sp(stack, d).curi;
 
                     if cur > len || *byts.add(arridx + cur as usize) != 0 {
-                        sp(stack, d).state = State::EndNul;
+                        state = State::EndNul;
                         continue;
                     }
 
@@ -498,8 +500,10 @@ pub(crate) fn suggest_trie_walk(
                         }
                         if can_go_deeper(stack, d, extra, maxscore) {
                             let prev_fidx = sp(stack, d).fidx;
+                            sp(stack, d).state = state;
                             go_deeper(stack, d, extra);
                             depth += 1;
+                            state = State::Start;
                             let sd = depth as usize;
                             sp(stack, sd).arridx = 0;
                             sp(stack, sd).split_tword_off = tword_len as u8;
@@ -512,22 +516,22 @@ pub(crate) fn suggest_trie_walk(
 
                 State::EndNul => {
                     if sp(stack, d).fidx >= eff_fword_len {
-                        sp(stack, d).state = State::Del;
+                        state = State::Del;
                     } else {
-                        sp(stack, d).state = State::Plain;
+                        state = State::Plain;
                     }
                 }
 
                 State::Plain => {
                     let arridx = sp(stack, d).arridx as usize;
                     if arridx >= byts_len {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
                     let len = *byts.add(arridx) as i16;
 
                     if sp(stack, d).curi > len {
-                        sp(stack, d).state = if sp(stack, d).fidx >= sp(stack, d).fidxtry {
+                        state = if sp(stack, d).fidx >= sp(stack, d).fidxtry {
                             State::Del
                         } else {
                             State::Final
@@ -559,8 +563,10 @@ pub(crate) fn suggest_trie_walk(
                     }
 
                     if can_go_deeper(stack, d, newscore, maxscore) {
+                        sp(stack, d).state = state;
                         go_deeper(stack, d, newscore);
                         depth += 1;
+                        state = State::Start;
                         let sd = depth as usize;
                         if fidx < eff_fword_len {
                             sp(stack, sd).fidx += 1;
@@ -578,7 +584,7 @@ pub(crate) fn suggest_trie_walk(
                 }
 
                 State::Del => {
-                    sp(stack, d).state = State::InsPrep;
+                    state = State::InsPrep;
                     sp(stack, d).curi = 1;
 
                     let fidx = sp(stack, d).fidx;
@@ -592,8 +598,10 @@ pub(crate) fn suggest_trie_walk(
 
                     if can_go_deeper(stack, d, newscore, maxscore) {
                         let prev_fidx = sp(stack, d).fidx;
+                        sp(stack, d).state = state;
                         go_deeper(stack, d, newscore);
                         depth += 1;
+                        state = State::Start;
                         let sd = depth as usize;
                         sp(stack, sd).flags |= TSF_DIDDEL;
                         sp(stack, sd).delidx = prev_fidx;
@@ -608,24 +616,24 @@ pub(crate) fn suggest_trie_walk(
 
                 State::InsPrep => {
                     if sp(stack, d).flags & TSF_DIDDEL != 0 {
-                        sp(stack, d).state = State::Swap;
+                        state = State::Swap;
                         continue;
                     }
 
                     let arridx = sp(stack, d).arridx as usize;
                     if arridx >= byts_len {
-                        sp(stack, d).state = State::Swap;
+                        state = State::Swap;
                         continue;
                     }
                     let len = *byts.add(arridx) as i16;
 
                     loop {
                         if sp(stack, d).curi > len {
-                            sp(stack, d).state = State::Swap;
+                            state = State::Swap;
                             break;
                         }
                         if *byts.add(arridx + sp(stack, d).curi as usize) != 0 {
-                            sp(stack, d).state = State::Ins;
+                            state = State::Ins;
                             break;
                         }
                         sp(stack, d).curi += 1;
@@ -635,13 +643,13 @@ pub(crate) fn suggest_trie_walk(
                 State::Ins => {
                     let arridx = sp(stack, d).arridx as usize;
                     if arridx >= byts_len {
-                        sp(stack, d).state = State::Swap;
+                        state = State::Swap;
                         continue;
                     }
                     let len = *byts.add(arridx) as i16;
 
                     if sp(stack, d).curi > len {
-                        sp(stack, d).state = State::Swap;
+                        state = State::Swap;
                         continue;
                     }
 
@@ -649,7 +657,7 @@ pub(crate) fn suggest_trie_walk(
                     sp(stack, d).curi += 1;
 
                     if idx >= byts_len {
-                        sp(stack, d).state = State::Swap;
+                        state = State::Swap;
                         continue;
                     }
                     let c = *byts.add(idx);
@@ -664,8 +672,10 @@ pub(crate) fn suggest_trie_walk(
                     }
 
                     if can_go_deeper(stack, d, SCORE_INS, maxscore) {
+                        sp(stack, d).state = state;
                         go_deeper(stack, d, SCORE_INS);
                         depth += 1;
+                        state = State::Start;
                         let sd = depth as usize;
                         *tword.get_unchecked_mut(sp(stack, sd).tword_len as usize) = c;
                         sp(stack, sd).tword_len += 1;
@@ -681,7 +691,7 @@ pub(crate) fn suggest_trie_walk(
                 State::Swap => {
                     let fidx = sp(stack, d).fidx;
                     if fidx + 1 >= eff_fword_len || sp(stack, d).fidx < sp(stack, d).fidxtry {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                         continue;
                     }
 
@@ -689,20 +699,22 @@ pub(crate) fn suggest_trie_walk(
                     let c2 = fword[fidx + 1];
 
                     if c1 == c2 {
-                        sp(stack, d).state = State::Swap3;
+                        state = State::Swap3;
                         continue;
                     }
 
                     if can_go_deeper(stack, d, SCORE_SWAP, maxscore) {
-                        sp(stack, d).state = State::Unswap;
+                        state = State::Unswap;
+                        sp(stack, d).state = state;
                         fword[fidx] = c2;
                         fword[fidx + 1] = c1;
                         let prev_fidx = sp(stack, d).fidx;
                         go_deeper(stack, d, SCORE_SWAP);
                         depth += 1;
+                        state = State::Start;
                         sp(stack, depth as usize).fidxtry = prev_fidx + 2;
                     } else {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                     }
                 }
 
@@ -712,13 +724,13 @@ pub(crate) fn suggest_trie_walk(
                     let c2 = fword[fidx + 1];
                     fword[fidx] = c2;
                     fword[fidx + 1] = c1;
-                    sp(stack, d).state = State::Swap3;
+                    state = State::Swap3;
                 }
 
                 State::Swap3 => {
                     let fidx = sp(stack, d).fidx;
                     if fidx + 2 >= eff_fword_len || sp(stack, d).fidx < sp(stack, d).fidxtry {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                         continue;
                     }
 
@@ -726,20 +738,22 @@ pub(crate) fn suggest_trie_walk(
                     let c3 = fword[fidx + 2];
 
                     if c1 == c3 {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                         continue;
                     }
 
                     if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
-                        sp(stack, d).state = State::Unswap3;
+                        state = State::Unswap3;
+                        sp(stack, d).state = state;
                         fword[fidx] = c3;
                         fword[fidx + 2] = c1;
                         let prev_fidx = sp(stack, d).fidx;
                         go_deeper(stack, d, SCORE_SWAP3);
                         depth += 1;
+                        state = State::Start;
                         sp(stack, depth as usize).fidxtry = prev_fidx + 3;
                     } else {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                     }
                 }
 
@@ -751,16 +765,17 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 2] = c1;
 
                     if fidx + 2 < eff_fword_len {
-                        sp(stack, d).state = State::Rot3l;
+                        state = State::Rot3l;
                     } else {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                     }
                 }
 
                 State::Rot3l => {
                     let fidx = sp(stack, d).fidx;
                     if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
-                        sp(stack, d).state = State::UnRot3l;
+                        state = State::UnRot3l;
+                        sp(stack, d).state = state;
                         let a = fword[fidx];
                         let b = fword[fidx + 1];
                         let c = fword[fidx + 2];
@@ -770,9 +785,10 @@ pub(crate) fn suggest_trie_walk(
                         let prev_fidx = sp(stack, d).fidx;
                         go_deeper(stack, d, SCORE_SWAP3);
                         depth += 1;
+                        state = State::Start;
                         sp(stack, depth as usize).fidxtry = prev_fidx + 3;
                     } else {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                     }
                 }
 
@@ -785,13 +801,14 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 1] = b;
                     fword[fidx + 2] = c;
 
-                    sp(stack, d).state = State::Rot3r;
+                    state = State::Rot3r;
                 }
 
                 State::Rot3r => {
                     let fidx = sp(stack, d).fidx;
                     if can_go_deeper(stack, d, SCORE_SWAP3, maxscore) {
-                        sp(stack, d).state = State::UnRot3r;
+                        state = State::UnRot3r;
+                        sp(stack, d).state = state;
                         let a = fword[fidx];
                         let b = fword[fidx + 1];
                         let c = fword[fidx + 2];
@@ -801,9 +818,10 @@ pub(crate) fn suggest_trie_walk(
                         let prev_fidx = sp(stack, d).fidx;
                         go_deeper(stack, d, SCORE_SWAP3);
                         depth += 1;
+                        state = State::Start;
                         sp(stack, depth as usize).fidxtry = prev_fidx + 3;
                     } else {
-                        sp(stack, d).state = State::RepIni;
+                        state = State::RepIni;
                     }
                 }
 
@@ -816,7 +834,7 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 1] = b;
                     fword[fidx + 2] = c;
 
-                    sp(stack, d).state = State::RepIni;
+                    state = State::RepIni;
                 }
 
                 State::RepIni => {
@@ -824,24 +842,24 @@ pub(crate) fn suggest_trie_walk(
                         || sp(stack, d).score + SCORE_REP >= maxscore
                         || sp(stack, d).fidx < sp(stack, d).fidxtry
                     {
-                        sp(stack, d).state = State::RepsalIni;
+                        state = State::RepsalIni;
                         continue;
                     }
 
                     let fidx = sp(stack, d).fidx;
                     if fidx >= eff_fword_len {
-                        sp(stack, d).state = State::RepsalIni;
+                        state = State::RepsalIni;
                         continue;
                     }
 
                     let first = dict.rep_first[fword[fidx] as usize];
                     if first < 0 {
-                        sp(stack, d).state = State::RepsalIni;
+                        state = State::RepsalIni;
                         continue;
                     }
 
                     sp(stack, d).curi = first as i16;
-                    sp(stack, d).state = State::Rep;
+                    state = State::Rep;
                 }
 
                 State::Rep => {
@@ -849,7 +867,7 @@ pub(crate) fn suggest_trie_walk(
                     let curi = sp(stack, d).curi as usize;
 
                     if curi >= dict.rep.len() {
-                        sp(stack, d).state = State::RepsalIni;
+                        state = State::RepsalIni;
                         continue;
                     }
 
@@ -858,7 +876,7 @@ pub(crate) fn suggest_trie_walk(
                     let first_byte = dict.arena[dict.rep[curi].from][0];
 
                     if first_byte != fword[fidx] {
-                        sp(stack, d).state = State::RepsalIni;
+                        state = State::RepsalIni;
                         continue;
                     }
 
@@ -879,7 +897,8 @@ pub(crate) fn suggest_trie_walk(
 
                     let to_bytes = &dict.arena[dict.rep[curi].to];
 
-                    sp(stack, d).state = State::RepUndo;
+                    state = State::RepUndo;
+                    sp(stack, d).state = state;
 
                     if from_len != to_len {
                         let fidx = fidx as usize;
@@ -900,6 +919,7 @@ pub(crate) fn suggest_trie_walk(
 
                     go_deeper(stack, d, SCORE_REP);
                     depth += 1;
+                    state = State::Start;
                     sp(stack, depth as usize).fidxtry = (fidx + to_len) as u8;
                 }
 
@@ -924,7 +944,7 @@ pub(crate) fn suggest_trie_walk(
                         fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
                     }
 
-                    sp(stack, d).state = State::Rep;
+                    state = State::Rep;
                 }
 
                 State::RepsalIni => {
@@ -932,24 +952,24 @@ pub(crate) fn suggest_trie_walk(
                         || sp(stack, d).score + SCORE_REP >= maxscore
                         || sp(stack, d).fidx < sp(stack, d).fidxtry
                     {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
 
                     let fidx = sp(stack, d).fidx;
                     if fidx >= eff_fword_len {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
 
                     let first = dict.repsal_first[fword[fidx] as usize];
                     if first < 0 {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
 
                     sp(stack, d).curi = first as i16;
-                    sp(stack, d).state = State::Repsal;
+                    state = State::Repsal;
                 }
 
                 State::Repsal => {
@@ -957,7 +977,7 @@ pub(crate) fn suggest_trie_walk(
                     let curi = sp(stack, d).curi as usize;
 
                     if curi >= dict.repsal.len() {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
 
@@ -966,7 +986,7 @@ pub(crate) fn suggest_trie_walk(
                     let first_byte = dict.arena[dict.repsal[curi].from][0];
 
                     if first_byte != fword[fidx] {
-                        sp(stack, d).state = State::Final;
+                        state = State::Final;
                         continue;
                     }
 
@@ -987,7 +1007,8 @@ pub(crate) fn suggest_trie_walk(
 
                     let to_bytes = &dict.arena[dict.repsal[curi].to];
 
-                    sp(stack, d).state = State::RepsalUndo;
+                    state = State::RepsalUndo;
+                    sp(stack, d).state = state;
 
                     if from_len != to_len {
                         let fidx = fidx as usize;
@@ -1008,6 +1029,7 @@ pub(crate) fn suggest_trie_walk(
 
                     go_deeper(stack, d, SCORE_REP);
                     depth += 1;
+                    state = State::Start;
                     sp(stack, depth as usize).fidxtry = (fidx + to_len) as u8;
                 }
 
@@ -1032,7 +1054,7 @@ pub(crate) fn suggest_trie_walk(
                         fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
                     }
 
-                    sp(stack, d).state = State::Repsal;
+                    state = State::Repsal;
                 }
 
                 State::Final => {
@@ -1040,6 +1062,7 @@ pub(crate) fn suggest_trie_walk(
                         break;
                     }
                     depth -= 1;
+                    state = sp(stack, depth as usize).state;
                 }
             }
         }
