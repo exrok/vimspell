@@ -1,5 +1,8 @@
 //! # vim-spell: High performance spell-check with vim's spl dictionary support.
 mod parser;
+mod soundfold;
+#[cfg(test)]
+mod tests;
 
 const VIMSPELLMAGIC: &[u8; 8] = b"VIMspell";
 const VIMSPELLVERSION: u8 = 50;
@@ -13,8 +16,12 @@ const SN_MIDWORD: u8 = 2;
 const SN_PREFCOND: u8 = 3;
 const SN_COMPOUND: u8 = 8;
 const SN_SYLLABLE: u8 = 9;
+const SN_REP: u8 = 4;
 const SN_SAL: u8 = 5;
+const SN_MAP: u8 = 7;
 const SN_NOBREAK: u8 = 10;
+const SN_REPSAL: u8 = 12;
+const SN_WORDS: u8 = 13;
 const SN_END: u8 = 255;
 
 const SNF_REQUIRED: u8 = 1;
@@ -23,11 +30,22 @@ const SAL_F0LLOWUP: u8 = 1;
 const SAL_COLLAPSE: u8 = 2;
 const SAL_REM_ACCENTS: u8 = 4;
 
+const SCORE_SIMILAR: i32 = 33;
+const SCORE_REP: i32 = 65;
 const SCORE_SWAP: i32 = 75;
 const SCORE_SUBST: i32 = 93;
 const SCORE_DEL: i32 = 94;
 const SCORE_INS: i32 = 96;
+const SCORE_REGION: i32 = 200;
 const SCORE_MAXMAX: i32 = 999999;
+
+const SCORE_COMMON1: i32 = 30;
+const SCORE_COMMON2: i32 = 40;
+const SCORE_COMMON3: i32 = 50;
+const SCORE_THRES2: u16 = 10;
+const SCORE_THRES3: u16 = 100;
+
+const REGION_ALL: u8 = 0xff;
 
 const WF_REGION: u8 = 0x01;
 const WF_ONECAP: u8 = 0x02;
@@ -385,6 +403,99 @@ impl Bytes {
     }
 }
 
+fn fnv1a(data: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c9dc5;
+    for &b in data {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
+}
+
+#[derive(Clone, Copy)]
+struct CommonWordEntry {
+    word: Bytes,
+    count: u16,
+}
+
+impl Default for CommonWordEntry {
+    fn default() -> Self {
+        Self {
+            word: Bytes::default(),
+            count: 0,
+        }
+    }
+}
+
+struct CommonWords {
+    entries: Vec<CommonWordEntry>,
+    mask: u32,
+}
+
+impl CommonWords {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            mask: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn with_capacity(cap: usize) -> Self {
+        if cap == 0 {
+            return Self::new();
+        }
+        let table_size = (cap * 2).next_power_of_two();
+        Self {
+            entries: vec![CommonWordEntry::default(); table_size],
+            mask: (table_size - 1) as u32,
+        }
+    }
+
+    fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
+        if self.entries.is_empty() {
+            return 0;
+        }
+        let hash = fnv1a(word);
+        let mut idx = (hash & self.mask) as usize;
+        loop {
+            let entry = self.entries[idx];
+            if entry.word.is_empty() {
+                return 0;
+            }
+            if arena[entry.word] == *word {
+                return entry.count;
+            }
+            idx = (idx + 1) & self.mask as usize;
+        }
+    }
+
+    fn insert(&mut self, arena: &Arena, word: Bytes, count: u16) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let key = &arena[word];
+        let hash = fnv1a(key);
+        let mut idx = (hash & self.mask) as usize;
+        loop {
+            let entry = &mut self.entries[idx];
+            if entry.word.is_empty() {
+                entry.word = word;
+                entry.count = count;
+                return;
+            }
+            if arena[entry.word] == *key {
+                entry.count = entry.count.saturating_add(count);
+                return;
+            }
+            idx = (idx + 1) & self.mask as usize;
+        }
+    }
+}
+
 fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
     let mut ci = 0usize;
     let mut wi = 0usize;
@@ -431,527 +542,15 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
     true
 }
 
-fn is_word_char_w(c: char, charflags: &CharFlags) -> bool {
-    if (c as u32) < 256 {
-        charflags.is_word_char(c as u8)
-    } else {
-        true
-    }
+struct MapInfo {
+    map_array: [u32; 256],
+    #[allow(dead_code)]
+    map_hash: Vec<(char, u32)>,
 }
 
-/// Port of spell_soundfold_wsal from Neovim's spell.c:2891-3181.
-/// Applies SAL phonetic rules to produce a soundfolded representation.
-fn soundfold_wsal(sal: &SalInfo, input: &[u8], charflags: &CharFlags) -> Vec<u8> {
-    let as_str = std::str::from_utf8(input).unwrap_or("");
-    let mut word: Vec<char> = Vec::with_capacity(MAXWLEN + 1);
-    let mut did_white = false;
-    for ch in as_str.chars() {
-        if sal.rem_accents {
-            if ch == ' ' || ch == '\t' {
-                if did_white {
-                    continue;
-                }
-                word.push(' ');
-                did_white = true;
-                continue;
-            }
-            did_white = false;
-            if !is_word_char_w(ch, charflags) {
-                continue;
-            }
-        }
-        word.push(ch);
-        if word.len() >= MAXWLEN - 1 {
-            break;
-        }
-    }
-    word.push('\0'); // NUL sentinel
-
-    let low_byte = |c: char| (c as u32 & 0xff) as usize;
-
-    let smp = &sal.items;
-    let mut wres: Vec<char> = Vec::with_capacity(MAXWLEN);
-    let mut k: usize = 0;
-    let mut p0: i32 = -333;
-    let mut i: usize = 0;
-    let mut z: bool = false;
-
-    while word[i] != '\0' {
-        let mut c = word[i];
-        let n_start = sal.first[low_byte(c)];
-        let mut z0 = false;
-
-        if n_start >= 0 {
-            let mut n = n_start as usize;
-
-            while n < smp.len()
-                && !smp[n].lead.is_empty()
-                && low_byte(smp[n].lead[0]) == low_byte(c)
-            {
-                if c != smp[n].lead[0] {
-                    n += 1;
-                    continue;
-                }
-                k = smp[n].lead.len();
-                if k > 1 {
-                    if word[i + 1] != smp[n].lead[1] {
-                        n += 1;
-                        continue;
-                    }
-                    if k > 2 {
-                        let mut matched = true;
-                        for j in 2..k {
-                            if word[i + j] != smp[n].lead[j] {
-                                matched = false;
-                                break;
-                            }
-                        }
-                        if !matched {
-                            n += 1;
-                            continue;
-                        }
-                    }
-                }
-
-                if !smp[n].oneof.is_empty() {
-                    if !smp[n].oneof.contains(&word[i + k]) {
-                        n += 1;
-                        continue;
-                    }
-                    k += 1;
-                }
-
-                let rules = &smp[n].rules;
-                let mut pri: i32 = 5;
-
-                p0 = if rules.is_empty() { 0 } else { rules[0] as i32 };
-                let k0 = k;
-                let mut si = 0usize;
-
-                while si < rules.len() && rules[si] == b'-' && k > 1 {
-                    k -= 1;
-                    si += 1;
-                }
-                if si < rules.len() && rules[si] == b'<' {
-                    si += 1;
-                }
-                if si < rules.len() && rules[si].is_ascii_digit() {
-                    pri = (rules[si] - b'0') as i32;
-                    si += 1;
-                }
-                if si + 1 < rules.len() && rules[si] == b'^' && rules[si + 1] == b'^' {
-                    si += 1;
-                }
-
-                let sc = if si < rules.len() { rules[si] } else { 0 };
-                let sc_next = if si + 1 < rules.len() { rules[si + 1] } else { 0 };
-
-                let wk0 = word[i + k0];
-                let is_word_at_k0 = wk0 != '\0' && is_word_char_w(wk0, charflags);
-
-                let prev_is_word =
-                    i > 0 && (word[i - 1] == ' ' || is_word_char_w(word[i - 1], charflags));
-
-                let cond_ok = sc == 0
-                    || (sc == b'^'
-                        && (i == 0 || !prev_is_word)
-                        && (sc_next != b'$' || !is_word_at_k0))
-                    || (sc == b'$' && i > 0 && prev_is_word && !is_word_at_k0);
-
-                if !cond_ok {
-                    n += 1;
-                    continue;
-                }
-
-                // Search for followup rules.
-                let c0 = word[i + k - 1];
-                let n0_start = sal.first[low_byte(c0)];
-
-                let mut followup_wins = false;
-                if sal.followup
-                    && k > 1
-                    && n0_start >= 0
-                    && p0 != b'-' as i32
-                    && word[i + k] != '\0'
-                {
-                    let mut n0 = n0_start as usize;
-                    let mut found_followup = false;
-
-                    while n0 < smp.len()
-                        && !smp[n0].lead.is_empty()
-                        && low_byte(smp[n0].lead[0]) == low_byte(c0)
-                    {
-                        if c0 != smp[n0].lead[0] {
-                            n0 += 1;
-                            continue;
-                        }
-                        let mut fk0 = smp[n0].lead.len();
-                        if fk0 > 1 {
-                            if word[i + k] != smp[n0].lead[1] {
-                                n0 += 1;
-                                continue;
-                            }
-                            if fk0 > 2 {
-                                let mut matched = true;
-                                for j in 2..fk0 {
-                                    if word[i + k + j - 1] != smp[n0].lead[j] {
-                                        matched = false;
-                                        break;
-                                    }
-                                }
-                                if !matched {
-                                    n0 += 1;
-                                    continue;
-                                }
-                            }
-                        }
-                        fk0 += k - 1;
-
-                        if !smp[n0].oneof.is_empty() {
-                            if !smp[n0].oneof.contains(&word[i + fk0]) {
-                                n0 += 1;
-                                continue;
-                            }
-                            fk0 += 1;
-                        }
-
-                        let mut fp0: i32 = 5;
-                        let frules = &smp[n0].rules;
-                        let mut fsi = 0usize;
-                        while fsi < frules.len() && frules[fsi] == b'-' {
-                            fsi += 1;
-                        }
-                        if fsi < frules.len() && frules[fsi] == b'<' {
-                            fsi += 1;
-                        }
-                        if fsi < frules.len() && frules[fsi].is_ascii_digit() {
-                            fp0 = (frules[fsi] - b'0') as i32;
-                            fsi += 1;
-                        }
-
-                        let fcond = if fsi < frules.len() { frules[fsi] } else { 0 };
-                        let fwk0 = word[i + fk0];
-                        let f_is_word_at_k0 =
-                            fwk0 != '\0' && is_word_char_w(fwk0, charflags);
-
-                        if fcond == 0 || (fcond == b'$' && !f_is_word_at_k0) {
-                            if fk0 == k {
-                                n0 += 1;
-                                continue;
-                            }
-                            if fp0 < pri {
-                                n0 += 1;
-                                continue;
-                            }
-                            found_followup = true;
-                            break;
-                        }
-                        n0 += 1;
-                    }
-
-                    if found_followup
-                        && n0 < smp.len()
-                        && !smp[n0].lead.is_empty()
-                        && low_byte(smp[n0].lead[0]) == low_byte(c0)
-                    {
-                        followup_wins = true;
-                    }
-                }
-
-                if followup_wins {
-                    n += 1;
-                    continue;
-                }
-
-                // Apply replacement.
-                let to = &smp[n].to;
-                let rules_ref = &smp[n].rules;
-                let has_lt = rules_ref.contains(&b'<');
-                p0 = if has_lt { 1 } else { 0 };
-
-                if has_lt && !z {
-                    // In-place replacement ('<').
-                    if !wres.is_empty()
-                        && !to.is_empty()
-                        && (*wres.last().unwrap() == c || *wres.last().unwrap() == to[0])
-                    {
-                        wres.pop();
-                    }
-                    z0 = true;
-                    z = true;
-                    let mut k0_ip = 0usize;
-                    for &tc in to {
-                        if word[i + k0_ip] == '\0' {
-                            break;
-                        }
-                        word[i + k0_ip] = tc;
-                        k0_ip += 1;
-                    }
-                    if k > k0_ip {
-                        let start = i + k0_ip;
-                        let end = i + k;
-                        if end <= word.len() {
-                            word.drain(start..end);
-                        }
-                    }
-                    c = word[i];
-                } else {
-                    // Normal replacement.
-                    i += k - 1;
-                    z = false;
-                    if !to.is_empty() {
-                        for ti in 0..to.len() - 1 {
-                            if wres.len() >= MAXWLEN {
-                                break;
-                            }
-                            if wres.is_empty() || *wres.last().unwrap() != to[ti] {
-                                wres.push(to[ti]);
-                            }
-                        }
-                    }
-                    c = if to.is_empty() { '\0' } else { *to.last().unwrap() };
-
-                    if rules.windows(2).any(|w| w[0] == b'^' && w[1] == b'^') {
-                        if c != '\0' && wres.len() < MAXWLEN {
-                            wres.push(c);
-                        }
-                        let shift = i + 1;
-                        if shift < word.len() {
-                            word.drain(0..shift);
-                        }
-                        i = 0;
-                        z0 = true;
-                    }
-                }
-                break;
-            }
-        } else if c == ' ' || c == '\t' {
-            c = ' ';
-            k = 1;
-        }
-
-        // Output section.
-        if !z0 {
-            if k != 0
-                && p0 == 0
-                && wres.len() < MAXWLEN
-                && c != '\0'
-                && (!sal.collapse || wres.is_empty() || *wres.last().unwrap() != c)
-            {
-                wres.push(c);
-            }
-            i += 1;
-            z = false;
-            k = 0;
-        }
-    }
-
-    let result: String = wres.into_iter().collect();
-    result.into_bytes()
-}
-
-/// Port of soundalike_score from Neovim's spellsuggest.c:3247-3456.
-/// Compare two soundfolded strings and return a score (lower = more similar).
-fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
-    let mut goodsound = goodstart;
-    let mut badsound = badstart;
-    let mut score = 0i32;
-
-    // Handle '*' (vowel) at start.
-    if (!badsound.is_empty() || !goodsound.is_empty())
-        && ((badsound.first() == Some(&b'*') || goodsound.first() == Some(&b'*'))
-            && badsound.first() != goodsound.first())
-    {
-        if (badsound.is_empty() && goodsound.len() == 2)
-            || (goodsound.is_empty() && badsound.len() == 2)
-        {
-            return SCORE_DEL;
-        }
-        if badsound.is_empty() || goodsound.is_empty() {
-            return SCORE_MAXMAX;
-        }
-
-        if (badsound.len() > 1 && goodsound.len() > 1 && badsound[1] == goodsound[1])
-            || (badsound.len() > 2 && goodsound.len() > 2 && badsound[2] == goodsound[2])
-        {
-            // Handle like a substitute.
-        } else {
-            score = 2 * SCORE_DEL / 3;
-            if badsound.first() == Some(&b'*') {
-                badsound = &badsound[1..];
-            } else {
-                goodsound = &goodsound[1..];
-            }
-        }
-    }
-
-    let goodlen = goodsound.len() as i32;
-    let badlen = badsound.len() as i32;
-
-    let n = goodlen - badlen;
-    if n < -2 || n > 2 {
-        return SCORE_MAXMAX;
-    }
-
-    // pl = longest, ps = shortest.
-    let (mut pl, mut ps) = if n > 0 {
-        (goodsound, badsound)
-    } else {
-        (badsound, goodsound)
-    };
-
-    // Skip identical prefix.
-    while !pl.is_empty() && !ps.is_empty() && pl[0] == ps[0] {
-        pl = &pl[1..];
-        ps = &ps[1..];
-    }
-
-    match n {
-        -2 | 2 => {
-            // Must delete two characters from pl.
-            if pl.is_empty() {
-                return SCORE_MAXMAX;
-            }
-            pl = &pl[1..]; // first delete
-            while !pl.is_empty() && !ps.is_empty() && pl[0] == ps[0] {
-                pl = &pl[1..];
-                ps = &ps[1..];
-            }
-            if !pl.is_empty() && pl[1..] == *ps {
-                return score + SCORE_DEL * 2;
-            }
-        }
-        -1 | 1 => {
-            // At least one delete from pl.
-
-            // 1: delete
-            let (mut pl2, mut ps2) = (&pl[1..], ps);
-            while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
-                pl2 = &pl2[1..];
-                ps2 = &ps2[1..];
-            }
-            if pl2.is_empty() && ps2.is_empty() {
-                return score + SCORE_DEL;
-            }
-
-            // 2: delete then swap
-            if pl2.len() >= 2
-                && ps2.len() >= 2
-                && pl2[0] == ps2[1]
-                && pl2[1] == ps2[0]
-                && pl2[2..] == ps2[2..]
-            {
-                return score + SCORE_DEL + SCORE_SWAP;
-            }
-
-            // 3: delete then substitute
-            if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
-                return score + SCORE_DEL + SCORE_SUBST;
-            }
-
-            // 4: first swap then delete
-            if pl.len() >= 2 && ps.len() >= 2 && pl[0] == ps[1] && pl[1] == ps[0] {
-                let (mut pl2, mut ps2) = (&pl[2..], &ps[2..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
-                    pl2 = &pl2[1..];
-                    ps2 = &ps2[1..];
-                }
-                if !pl2.is_empty() && pl2[1..] == *ps2 {
-                    return score + SCORE_SWAP + SCORE_DEL;
-                }
-            }
-
-            // 5: first substitute then delete
-            if !pl.is_empty() && !ps.is_empty() {
-                let (mut pl2, mut ps2) = (&pl[1..], &ps[1..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
-                    pl2 = &pl2[1..];
-                    ps2 = &ps2[1..];
-                }
-                if !pl2.is_empty() && pl2[1..] == *ps2 {
-                    return score + SCORE_SUBST + SCORE_DEL;
-                }
-            }
-        }
-        0 => {
-            // Same length.
-            // 1: identical
-            if pl.is_empty() {
-                return score;
-            }
-
-            // 2: swap
-            if pl.len() >= 2 && ps.len() >= 2 && pl[0] == ps[1] && pl[1] == ps[0] {
-                let (mut pl2, mut ps2) = (&pl[2..], &ps[2..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
-                    pl2 = &pl2[1..];
-                    ps2 = &ps2[1..];
-                }
-                if pl2.is_empty() && ps2.is_empty() {
-                    return score + SCORE_SWAP;
-                }
-                // 3: swap and swap
-                if pl2.len() >= 2
-                    && ps2.len() >= 2
-                    && pl2[0] == ps2[1]
-                    && pl2[1] == ps2[0]
-                    && pl2[2..] == ps2[2..]
-                {
-                    return score + SCORE_SWAP + SCORE_SWAP;
-                }
-                // 4: swap and substitute
-                if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
-                    return score + SCORE_SWAP + SCORE_SUBST;
-                }
-            }
-
-            // 5: substitute
-            if !pl.is_empty() && !ps.is_empty() {
-                let (mut pl2, mut ps2) = (&pl[1..], &ps[1..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
-                    pl2 = &pl2[1..];
-                    ps2 = &ps2[1..];
-                }
-                if pl2.is_empty() && ps2.is_empty() {
-                    return score + SCORE_SUBST;
-                }
-                // 6: substitute and swap
-                if pl2.len() >= 2
-                    && ps2.len() >= 2
-                    && pl2[0] == ps2[1]
-                    && pl2[1] == ps2[0]
-                    && pl2[2..] == ps2[2..]
-                {
-                    return score + SCORE_SUBST + SCORE_SWAP;
-                }
-                // 7: substitute and substitute
-                if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
-                    return score + SCORE_SUBST + SCORE_SUBST;
-                }
-                // 8: insert then delete
-                let (mut pl3, mut ps3) = (pl, &ps[1..]);
-                while !pl3.is_empty() && !ps3.is_empty() && pl3[0] == ps3[0] {
-                    pl3 = &pl3[1..];
-                    ps3 = &ps3[1..];
-                }
-                if !pl3.is_empty() && !ps3.is_empty() && pl3[1..] == *ps3 {
-                    return score + SCORE_INS + SCORE_DEL;
-                }
-                // 9: delete then insert
-                let (mut pl3, mut ps3) = (&pl[1..], ps);
-                while !pl3.is_empty() && !ps3.is_empty() && pl3[0] == ps3[0] {
-                    pl3 = &pl3[1..];
-                    ps3 = &ps3[1..];
-                }
-                if !pl3.is_empty() && !ps3.is_empty() && *pl3 == ps3[1..] {
-                    return score + SCORE_INS + SCORE_DEL;
-                }
-            }
-        }
-        _ => {}
-    }
-
-    SCORE_MAXMAX
+struct RepItem {
+    from: Bytes,
+    to: Bytes,
 }
 
 struct SalItem {
@@ -977,8 +576,8 @@ pub struct Dictionary {
     keeptree: WordTree,
     prefixtree: WordTree,
     charflags: CharFlags,
-    #[allow(dead_code)]
     regions: Vec<[u8; 2]>,
+    region: u8,
     #[allow(dead_code)]
     midword: Bytes,
     prefcond: Vec<Bytes>,
@@ -993,6 +592,12 @@ pub struct Dictionary {
     #[allow(dead_code)]
     nobreak: bool,
     sal: Option<SalInfo>,
+    map: Option<MapInfo>,
+    rep: Vec<RepItem>,
+    rep_first: [i16; 256],
+    repsal: Vec<RepItem>,
+    repsal_first: [i16; 256],
+    common_words: CommonWords,
 }
 
 /// A detected typo with position information.
@@ -1015,10 +620,11 @@ impl Typo {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum WordResult {
     Valid,
     ValidRare,
+    WrongRegion,
     Banned,
     NotFound,
 }
@@ -1032,15 +638,81 @@ impl Dictionary {
         SpellCheckIter::new(self, input)
     }
 
+    /// Returns the region names defined in this dictionary.
+    ///
+    /// Each region is a 2-byte code (e.g., `b"us"`, `b"ca"`, `b"au"`).
+    /// The index of each region corresponds to its bit position in the
+    /// region bitmask used by `set_region`.
+    pub fn region_names(&self) -> &[[u8; 2]] {
+        &self.regions
+    }
+
+    /// Set the active region for spell checking.
+    ///
+    /// Words marked as region-specific will only be accepted if they
+    /// match this region. Pass a 2-byte region code (e.g., `b"us"`).
+    /// If the region is not found in the dictionary, the region is set
+    /// to [`REGION_ALL`] (accept all regions).
+    pub fn set_region(&mut self, region: &[u8; 2]) {
+        for (i, name) in self.regions.iter().enumerate() {
+            if name == region {
+                self.region = 1 << i;
+                return;
+            }
+        }
+        self.region = REGION_ALL;
+    }
+
+    /// Clear the active region, accepting words from all regions.
+    pub fn clear_region(&mut self) {
+        self.region = REGION_ALL;
+    }
+
     pub fn has_sal(&self) -> bool {
         self.sal.is_some()
+    }
+
+    /// Returns `true` if the dictionary has MAP data for similar-character scoring.
+    pub fn has_map(&self) -> bool {
+        self.map.is_some()
+    }
+
+    /// Returns `true` if the dictionary has common word frequency data.
+    pub fn has_common_words(&self) -> bool {
+        !self.common_words.is_empty()
+    }
+
+    fn similar_chars(&self, c1: u8, c2: u8) -> bool {
+        let Some(map) = &self.map else {
+            return false;
+        };
+        let m1 = map.map_array[c1 as usize];
+        if m1 == 0 {
+            return false;
+        }
+        m1 == map.map_array[c2 as usize]
+    }
+
+    fn score_wordcount_adj(&self, score: i32, word: &[u8]) -> i32 {
+        let count = self.common_words.lookup(&self.arena, word);
+        if count == 0 {
+            return score;
+        }
+        let bonus = if count < SCORE_THRES2 {
+            SCORE_COMMON1
+        } else if count < SCORE_THRES3 {
+            SCORE_COMMON2
+        } else {
+            SCORE_COMMON3
+        };
+        (score - bonus).max(0)
     }
 
     fn soundfold(&self, word: &[u8]) -> Vec<u8> {
         let Some(sal) = &self.sal else {
             return Vec::new();
         };
-        soundfold_wsal(sal, word, &self.charflags)
+        soundfold::soundfold_wsal(sal, word, &self.charflags)
     }
 
     /// Get spelling suggestions for a typo.
@@ -1058,11 +730,18 @@ impl Dictionary {
         let mut candidate = [0u8; MAXWLEN + 1];
         let word_len = word.len();
 
-        let add_candidate = |scored: &mut Vec<(Vec<u8>, i32)>,
-                                  cand: &[u8],
-                                  edit_score: i32| {
+        let add_candidate = |scored: &mut Vec<(Vec<u8>, i32)>, cand: &[u8], edit_score: i32| {
             if !scored.iter().any(|(s, _)| s.as_slice() == cand) {
                 scored.push((cand.to_vec(), edit_score));
+            }
+        };
+
+        // Returns the region penalty for a word result, or None if rejected.
+        let region_penalty = |result: &WordResult| -> Option<i32> {
+            match result {
+                WordResult::Valid => Some(0),
+                WordResult::WrongRegion => Some(SCORE_REGION),
+                _ => None,
             }
         };
 
@@ -1075,8 +754,14 @@ impl Dictionary {
                     continue;
                 }
                 candidate[i] = c;
-                if self.check_word_internal(&candidate[..word_len]) == WordResult::Valid {
-                    add_candidate(&mut scored, &candidate[..word_len], SCORE_SUBST);
+                let result = self.check_word_internal(&candidate[..word_len]);
+                if let Some(penalty) = region_penalty(&result) {
+                    let base = if self.similar_chars(original, c) {
+                        SCORE_SIMILAR
+                    } else {
+                        SCORE_SUBST
+                    };
+                    add_candidate(&mut scored, &candidate[..word_len], base + penalty);
                 }
             }
             candidate[i] = original;
@@ -1087,8 +772,9 @@ impl Dictionary {
             for i in 0..word_len {
                 candidate[..i].copy_from_slice(&word[..i]);
                 candidate[i..word_len - 1].copy_from_slice(&word[i + 1..]);
-                if self.check_word_internal(&candidate[..word_len - 1]) == WordResult::Valid {
-                    add_candidate(&mut scored, &candidate[..word_len - 1], SCORE_DEL);
+                let result = self.check_word_internal(&candidate[..word_len - 1]);
+                if let Some(penalty) = region_penalty(&result) {
+                    add_candidate(&mut scored, &candidate[..word_len - 1], SCORE_DEL + penalty);
                 }
             }
         }
@@ -1099,8 +785,9 @@ impl Dictionary {
             candidate[i + 1..=word_len].copy_from_slice(&word[i..]);
             for c in b'a'..=b'z' {
                 candidate[i] = c;
-                if self.check_word_internal(&candidate[..word_len + 1]) == WordResult::Valid {
-                    add_candidate(&mut scored, &candidate[..word_len + 1], SCORE_INS);
+                let result = self.check_word_internal(&candidate[..word_len + 1]);
+                if let Some(penalty) = region_penalty(&result) {
+                    add_candidate(&mut scored, &candidate[..word_len + 1], SCORE_INS + penalty);
                 }
             }
         }
@@ -1110,10 +797,45 @@ impl Dictionary {
             candidate[..word_len].copy_from_slice(word);
             for i in 0..word_len - 1 {
                 candidate.swap(i, i + 1);
-                if self.check_word_internal(&candidate[..word_len]) == WordResult::Valid {
-                    add_candidate(&mut scored, &candidate[..word_len], SCORE_SWAP);
+                let result = self.check_word_internal(&candidate[..word_len]);
+                if let Some(penalty) = region_penalty(&result) {
+                    add_candidate(&mut scored, &candidate[..word_len], SCORE_SWAP + penalty);
                 }
                 candidate.swap(i, i + 1);
+            }
+        }
+
+        // Try REP replacements from the .aff file.
+        if !self.rep.is_empty() {
+            let mut buf = [0u8; MAXWLEN * 2];
+            for i in 0..word_len {
+                let first = self.rep_first[word[i] as usize];
+                if first < 0 {
+                    continue;
+                }
+                let mut ri = first as usize;
+                while ri < self.rep.len() {
+                    let item = &self.rep[ri];
+                    let from = &self.arena[item.from];
+                    if from[0] != word[i] {
+                        break;
+                    }
+                    if i + from.len() <= word_len && word[i..i + from.len()] == *from {
+                        let to = &self.arena[item.to];
+                        let new_len = word_len - from.len() + to.len();
+                        if new_len <= MAXWLEN {
+                            buf[..i].copy_from_slice(&word[..i]);
+                            buf[i..i + to.len()].copy_from_slice(to);
+                            buf[i + to.len()..new_len]
+                                .copy_from_slice(&word[i + from.len()..word_len]);
+                            let result = self.check_word_internal(&buf[..new_len]);
+                            if let Some(penalty) = region_penalty(&result) {
+                                add_candidate(&mut scored, &buf[..new_len], SCORE_REP + penalty);
+                            }
+                        }
+                    }
+                    ri += 1;
+                }
             }
         }
 
@@ -1126,6 +848,39 @@ impl Dictionary {
             }
             let bad_sound = self.soundfold(&folded[..word_len]);
 
+            // Build alternative soundfolds via REPSAL rules.
+            let mut repsal_sounds: Vec<Vec<u8>> = Vec::new();
+            if !self.repsal.is_empty() && !bad_sound.is_empty() {
+                let bslen = bad_sound.len();
+                let mut buf = [0u8; MAXWLEN * 2];
+                for i in 0..bslen {
+                    let first = self.repsal_first[bad_sound[i] as usize];
+                    if first < 0 {
+                        continue;
+                    }
+                    let mut ri = first as usize;
+                    while ri < self.repsal.len() {
+                        let item = &self.repsal[ri];
+                        let from = &self.arena[item.from];
+                        if from[0] != bad_sound[i] {
+                            break;
+                        }
+                        if i + from.len() <= bslen && bad_sound[i..i + from.len()] == *from {
+                            let to = &self.arena[item.to];
+                            let new_len = bslen - from.len() + to.len();
+                            if new_len <= MAXWLEN {
+                                buf[..i].copy_from_slice(&bad_sound[..i]);
+                                buf[i..i + to.len()].copy_from_slice(to);
+                                buf[i + to.len()..new_len]
+                                    .copy_from_slice(&bad_sound[i + from.len()..bslen]);
+                                repsal_sounds.push(buf[..new_len].to_vec());
+                            }
+                        }
+                        ri += 1;
+                    }
+                }
+            }
+
             if !bad_sound.is_empty() {
                 for (cand_word, score) in &mut scored {
                     let mut cand_folded = [0u8; MAXWLEN];
@@ -1133,7 +888,13 @@ impl Dictionary {
                         cand_folded[i] = self.charflags.fold(b);
                     }
                     let good_sound = self.soundfold(&cand_folded[..cand_word.len()]);
-                    let sound_score = soundalike_score(&good_sound, &bad_sound);
+                    let mut sound_score = soundfold::soundalike_score(&good_sound, &bad_sound);
+                    for alt in &repsal_sounds {
+                        let alt_score = soundfold::soundalike_score(&good_sound, alt);
+                        if alt_score < sound_score {
+                            sound_score = alt_score;
+                        }
+                    }
                     let sound_score = if sound_score >= SCORE_MAXMAX {
                         SCORE_INS * 3
                     } else {
@@ -1144,7 +905,12 @@ impl Dictionary {
             }
         }
 
-        // Sort by score (lower is better).
+        if !self.common_words.is_empty() {
+            for (cand_word, score) in &mut scored {
+                *score = self.score_wordcount_adj(*score, cand_word);
+            }
+        }
+
         scored.sort_by_key(|(_, s)| *s);
         scored.truncate(10);
         scored.into_iter().map(|(w, _)| w).collect()
@@ -1186,6 +952,7 @@ impl Dictionary {
         }
 
         let mut flags_buf = [0u32; MAXWLEN];
+        let mut wrong_region = false;
 
         if !self.keeptree.is_empty() {
             let flags_count = self.find_word(&self.keeptree, word, &mut flags_buf);
@@ -1194,6 +961,10 @@ impl Dictionary {
                     return WordResult::Banned;
                 }
                 if flags & (WF_NEEDCOMP as u32) != 0 {
+                    continue;
+                }
+                if flags & (WF_REGION as u32) != 0 && self.region & ((flags >> 16) as u8) == 0 {
+                    wrong_region = true;
                     continue;
                 }
                 if flags & (WF_RARE as u32) != 0 {
@@ -1211,6 +982,9 @@ impl Dictionary {
             }
             if !self.comp_rules.is_empty() {
                 return self.check_compound(word, folded);
+            }
+            if wrong_region {
+                return WordResult::WrongRegion;
             }
             return WordResult::NotFound;
         }
@@ -1236,6 +1010,11 @@ impl Dictionary {
                 continue;
             }
 
+            if flags & (WF_REGION as u32) != 0 && self.region & ((flags >> 16) as u8) == 0 {
+                wrong_region = true;
+                continue;
+            }
+
             if flags & (WF_RARE as u32) != 0 {
                 return WordResult::ValidRare;
             }
@@ -1250,6 +1029,10 @@ impl Dictionary {
 
         if !self.comp_rules.is_empty() {
             return self.check_compound(word, folded);
+        }
+
+        if wrong_region {
+            return WordResult::WrongRegion;
         }
 
         WordResult::NotFound
@@ -1299,6 +1082,10 @@ impl Dictionary {
 
             for &flags in &flags_buf[..flags_count] {
                 if flags & (WF_BANNED as u32) != 0 {
+                    continue;
+                }
+
+                if flags & (WF_REGION as u32) != 0 && self.region & ((flags >> 16) as u8) == 0 {
                     continue;
                 }
 
@@ -1353,7 +1140,10 @@ impl Dictionary {
                     return true;
                 }
 
-                if !self.comp_rules.matches_partial(&self.arena, &comp_flags[..comp_len + 1]) {
+                if !self
+                    .comp_rules
+                    .matches_partial(&self.arena, &comp_flags[..comp_len + 1])
+                {
                     continue;
                 }
 
@@ -1586,6 +1376,7 @@ impl Dictionary {
         let remainder = &folded[prefix_len..];
         let mut flags_buf = [0u32; MAXWLEN];
         let flags_count = self.find_word(&self.foldtree, remainder, &mut flags_buf);
+        let mut wrong_region = false;
 
         for fi in 0..flags_count {
             let word_flags = flags_buf[fi];
@@ -1594,6 +1385,12 @@ impl Dictionary {
                 continue;
             }
             if word_flags & (WF_NEEDCOMP as u32) != 0 {
+                continue;
+            }
+
+            if word_flags & (WF_REGION as u32) != 0 && self.region & ((word_flags >> 16) as u8) == 0
+            {
+                wrong_region = true;
                 continue;
             }
 
@@ -1625,8 +1422,7 @@ impl Dictionary {
                     }
                 }
 
-                let is_rare =
-                    (pidx & WF_RAREPFX != 0) || (word_flags & (WF_RARE as u32) != 0);
+                let is_rare = (pidx & WF_RAREPFX != 0) || (word_flags & (WF_RARE as u32) != 0);
                 if is_rare {
                     return WordResult::ValidRare;
                 }
@@ -1634,6 +1430,9 @@ impl Dictionary {
             }
         }
 
+        if wrong_region {
+            return WordResult::WrongRegion;
+        }
         WordResult::NotFound
     }
 
@@ -1805,564 +1604,6 @@ impl Iterator for SpellCheckIter<'_> {
                     end: end as u32,
                 });
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn load_dict() -> Dictionary {
-        let contents = std::fs::read("/code/vim-spell/en.utf-8.spl").expect("should read file");
-        Dictionary::parse(&contents).expect("should parse dictionary")
-    }
-
-    #[test]
-    fn test_parse_dictionary() {
-        let dict = load_dict();
-        assert!(!dict.foldtree.is_empty());
-    }
-
-    #[test]
-    fn test_check_valid_words() {
-        let dict = load_dict();
-
-        assert!(dict.check_word(b"hello"));
-        assert!(dict.check_word(b"world"));
-        assert!(dict.check_word(b"the"));
-        assert!(dict.check_word(b"is"));
-        assert!(dict.check_word(b"a"));
-    }
-
-    #[test]
-    fn test_check_invalid_words() {
-        let dict = load_dict();
-
-        assert!(!dict.check_word(b"asdfgh"));
-        assert!(!dict.check_word(b"xyzabc"));
-        assert!(!dict.check_word(b"sampl"));
-    }
-
-    #[test]
-    fn test_spell_check_iter() {
-        let dict = load_dict();
-
-        let input = b"This is a sampl text with a typo";
-        let typos: Vec<_> = dict.spell_check(input).collect();
-
-        assert!(!typos.is_empty());
-        let words: Vec<_> = typos.iter().map(|t| t.word(input)).collect();
-        assert!(words.iter().any(|w| *w == b"sampl"));
-    }
-
-    #[test]
-    fn test_suggestions() {
-        let dict = load_dict();
-
-        let input = b"sampl";
-        let typo = Typo { start: 0, end: 5 };
-        let suggestions = dict.suggestions(&typo, input);
-
-        assert!(suggestions.iter().any(|s| s == b"sample"));
-    }
-
-    #[test]
-    fn test_typo_zero_copy() {
-        let dict = load_dict();
-
-        let input = b"hello wrold goodbye";
-        let typos: Vec<_> = dict.spell_check(input).collect();
-
-        assert_eq!(typos.len(), 1);
-        assert_eq!(typos[0].start, 6);
-        assert_eq!(typos[0].end, 11);
-        assert_eq!(typos[0].word(input), b"wrold");
-    }
-
-    #[test]
-    fn test_compound_rules_simple() {
-        let mut arena = Arena::default();
-        let mut rules = CompoundRules::new();
-        rules.rules.push(arena.alloc(b"abc"));
-        rules.start_flags.push(b'a');
-        rules.all_flags.extend_from_slice(&[b'a', b'b', b'c']);
-
-        assert!(rules.flag_allowed_at_start(b'a'));
-        assert!(!rules.flag_allowed_at_start(b'b'));
-        assert!(rules.flag_allowed(b'a'));
-        assert!(rules.flag_allowed(b'b'));
-        assert!(rules.flag_allowed(b'c'));
-
-        assert!(rules.matches_partial(&arena, &[b'a']));
-        assert!(rules.matches_partial(&arena, &[b'a', b'b']));
-        assert!(rules.matches_partial(&arena, &[b'a', b'b', b'c']));
-        assert!(!rules.matches_partial(&arena, &[b'x']));
-
-        assert!(rules.matches_complete(&arena, &[b'a', b'b', b'c']));
-        assert!(!rules.matches_complete(&arena, &[b'a', b'b']));
-        assert!(!rules.matches_complete(&arena, &[b'a', b'b', b'c', b'd']));
-    }
-
-    #[test]
-    fn test_compound_rules_with_brackets() {
-        let mut arena = Arena::default();
-        let mut rules = CompoundRules::new();
-        rules.rules.push(arena.alloc(b"[ab]c"));
-        rules.start_flags.extend_from_slice(&[b'a', b'b']);
-        rules.all_flags.extend_from_slice(&[b'a', b'b', b'c']);
-
-        assert!(rules.matches_partial(&arena, &[b'a']));
-        assert!(rules.matches_partial(&arena, &[b'b']));
-        assert!(rules.matches_partial(&arena, &[b'a', b'c']));
-        assert!(rules.matches_partial(&arena, &[b'b', b'c']));
-
-        assert!(rules.matches_complete(&arena, &[b'a', b'c']));
-        assert!(rules.matches_complete(&arena, &[b'b', b'c']));
-        assert!(!rules.matches_complete(&arena, &[b'a']));
-        assert!(!rules.matches_complete(&arena, &[b'c', b'a']));
-    }
-
-    #[test]
-    fn test_compound_rules_with_plus() {
-        let mut arena = Arena::default();
-        let mut rules = CompoundRules::new();
-        rules.rules.push(arena.alloc(b"a+b"));
-        rules.start_flags.push(b'a');
-        rules.all_flags.extend_from_slice(&[b'a', b'b']);
-
-        assert!(rules.matches_complete(&arena, &[b'a', b'b']));
-        assert!(!rules.matches_complete(&arena, &[b'b']));
-    }
-
-    #[test]
-    fn test_compound_rules_multiple() {
-        let mut arena = Arena::default();
-        let mut rules = CompoundRules::new();
-        rules.rules.push(arena.alloc(b"ab"));
-        rules.rules.push(arena.alloc(b"cd"));
-        rules.start_flags.extend_from_slice(&[b'a', b'c']);
-        rules.all_flags.extend_from_slice(&[b'a', b'b', b'c', b'd']);
-
-        assert!(rules.matches_complete(&arena, &[b'a', b'b']));
-        assert!(rules.matches_complete(&arena, &[b'c', b'd']));
-        assert!(!rules.matches_complete(&arena, &[b'a', b'd']));
-    }
-
-    #[test]
-    fn test_syllable_counting_simple() {
-        let mut arena = Arena::default();
-        let mut syl = Syllable::new();
-        syl.chars = arena.alloc(b"aeiou");
-
-        assert_eq!(syl.count(&arena, b"hello"), 2);
-        assert_eq!(syl.count(&arena, b"beautiful"), 3);
-        assert_eq!(syl.count(&arena, b"xyz"), 0);
-    }
-
-    #[test]
-    fn test_syllable_counting_with_items() {
-        let mut arena = Arena::default();
-        let mut syl = Syllable::new();
-        syl.chars = arena.alloc(b"aeiou");
-        syl.items.push(SyllableItem {
-            chars: arena.alloc(b"ou"),
-        });
-
-        assert_eq!(syl.count(&arena, b"sound"), 1);
-    }
-
-    #[test]
-    fn test_syllable_counting_space_reset() {
-        let mut arena = Arena::default();
-        let mut syl = Syllable::new();
-        syl.chars = arena.alloc(b"aeiou");
-
-        assert_eq!(syl.count(&arena, b"he lo"), 1);
-    }
-
-    #[test]
-    fn test_compound_info() {
-        let dict = load_dict();
-        let info = dict.compound_info();
-
-        assert_eq!(info.max_words, 254);
-        assert_eq!(info.min_part_len, 0);
-    }
-
-    #[test]
-    fn test_prefix_words_in_foldtree() {
-        let dict = load_dict();
-        assert!(dict.check_word(b"undo"));
-        assert!(dict.check_word(b"unkind"));
-        assert!(dict.check_word(b"unable"));
-        assert!(dict.check_word(b"unlike"));
-        assert!(dict.check_word(b"rewrite"));
-        assert!(dict.check_word(b"reopen"));
-        assert!(dict.check_word(b"unhappy"));
-        assert!(dict.check_word(b"restart"));
-    }
-
-    #[test]
-    fn test_prefix_invalid_combos() {
-        let dict = load_dict();
-        assert!(!dict.check_word(b"unxyzabc"));
-        assert!(!dict.check_word(b"rexyzabc"));
-    }
-
-    fn build_prefix_dict() -> Dictionary {
-        // Manually construct a Dictionary with a synthetic prefix tree
-        // to test the prefix matching logic.
-        //
-        // Word tree contains "happy" with WF_AFX set and affix ID = 5.
-        // Prefix tree contains "un" with affix ID = 5 and no condition.
-        // So "unhappy" should be valid via prefix stripping.
-        let arena = Arena::default();
-
-        // Build foldtree containing "happy" with flags: WF_AFX | affix_id=5 in bits 24-31
-        // The trie for "happy": root -> h -> a -> p -> p -> y -> [end with flags]
-        //
-        // Trie layout: each node starts with a sibling count byte, then sibling entries.
-        // A sibling with byte 0 and flags in idxs is an end-of-word marker.
-        // A sibling with byte > 3 and child index in idxs is a character node.
-        //
-        // We encode: h-a-p-p-y with flags at the leaf.
-        let word_flags: u32 = (WF_AFX as u32) | (5u32 << 24);
-
-        // Node layout for "happy":
-        // [0] = 1 (1 sibling: 'h')
-        // [1] = 'h', idxs[1] = 2 (child at index 2)
-        // [2] = 1 (1 sibling: 'a')
-        // [3] = 'a', idxs[3] = 4
-        // [4] = 1 (1 sibling: 'p')
-        // [5] = 'p', idxs[5] = 6
-        // [6] = 1 (1 sibling: 'p')
-        // [7] = 'p', idxs[7] = 8
-        // [8] = 1 (1 sibling: 'y')
-        // [9] = 'y', idxs[9] = 10
-        // [10] = 1 (1 sibling: end-of-word marker)
-        // [11] = 0 (end marker), idxs[11] = word_flags
-        let foldtree = WordTree {
-            byts: vec![1, b'h', 1, b'a', 1, b'p', 1, b'p', 1, b'y', 1, 0],
-            idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, word_flags],
-        };
-
-        // Build prefix tree containing "un" with affix_id=5, condnr=0, pflags=0
-        // idxs value = (pflags << 24) | (condnr << 8) | affix_id = 0 | 0 | 5 = 5
-        // Node layout for "un":
-        // [0] = 1 (1 sibling: 'u')
-        // [1] = 'u', idxs[1] = 2
-        // [2] = 1 (1 sibling: 'n')
-        // [3] = 'n', idxs[3] = 4
-        // [4] = 1 (1 sibling: end-of-prefix marker)
-        // [5] = 0 (end marker), idxs[5] = 5 (affix_id=5, condnr=0, pflags=0)
-        let prefix_pidx: u32 = 5; // affix_id=5
-        let prefixtree = WordTree {
-            byts: vec![1, b'u', 1, b'n', 1, 0],
-            idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
-        };
-
-        // Empty condition (index 0) - always matches
-        let prefcond = vec![Bytes::default()];
-
-        Dictionary {
-            arena,
-            foldtree,
-            keeptree: WordTree::new(),
-            prefixtree,
-            charflags: CharFlags::new(),
-            regions: Vec::new(),
-            midword: Bytes::default(),
-            prefcond,
-            comp_max: MAXWLEN as u8,
-            comp_minlen: 0,
-            comp_sylmax: MAXWLEN as u8,
-            comp_options: 0,
-            comp_rules: CompoundRules::new(),
-            comp_patterns: Vec::new(),
-            syllable: Syllable::new(),
-            nobreak: false,
-            sal: None,
-        }
-    }
-
-    #[test]
-    fn test_prefix_synthetic_valid() {
-        let dict = build_prefix_dict();
-        assert!(dict.check_word(b"unhappy"));
-    }
-
-    #[test]
-    fn test_prefix_synthetic_root_valid() {
-        let dict = build_prefix_dict();
-        assert!(dict.check_word(b"happy"));
-    }
-
-    #[test]
-    fn test_prefix_synthetic_wrong_prefix() {
-        let dict = build_prefix_dict();
-        assert!(!dict.check_word(b"rehappy"));
-    }
-
-    #[test]
-    fn test_prefix_synthetic_nonsense_after_prefix() {
-        let dict = build_prefix_dict();
-        assert!(!dict.check_word(b"unxyzabc"));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_empty() {
-        assert!(match_prefix_condition(b"", b"anything"));
-        assert!(match_prefix_condition(b"", b""));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_literal() {
-        assert!(match_prefix_condition(b"ab", b"abcdef"));
-        assert!(!match_prefix_condition(b"ab", b"xbcdef"));
-        assert!(!match_prefix_condition(b"ab", b"a"));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_char_class() {
-        assert!(match_prefix_condition(b"[abc]", b"bfoo"));
-        assert!(match_prefix_condition(b"[abc]", b"afoo"));
-        assert!(!match_prefix_condition(b"[abc]", b"xfoo"));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_negated_class() {
-        assert!(match_prefix_condition(b"[^abc]", b"xfoo"));
-        assert!(!match_prefix_condition(b"[^abc]", b"afoo"));
-        assert!(!match_prefix_condition(b"[^abc]", b"bfoo"));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_dot() {
-        assert!(match_prefix_condition(b".", b"x"));
-        assert!(match_prefix_condition(b".", b"anything"));
-        assert!(!match_prefix_condition(b".", b""));
-    }
-
-    #[test]
-    fn test_match_prefix_condition_complex() {
-        assert!(match_prefix_condition(b"[aeiou]b", b"abcd"));
-        assert!(!match_prefix_condition(b"[aeiou]b", b"xbcd"));
-        assert!(!match_prefix_condition(b"[aeiou]b", b"axcd"));
-    }
-
-    #[test]
-    fn test_prefix_synthetic_with_condition() {
-        let mut arena = Arena::default();
-
-        let word_flags: u32 = (WF_AFX as u32) | (7u32 << 24);
-        let foldtree = WordTree {
-            byts: vec![
-                2, b'a', b'o', 1, b'k', 1, 0, 1, b'k', 1, 0,
-            ],
-            idxs: vec![
-                0, 3, 7, 0, 5, 0, word_flags, 0, 9, 0, word_flags,
-            ],
-        };
-
-        // Condition "[ao]" means the word after prefix must start with 'a' or 'o'.
-        let cond = arena.alloc(b"[ao]");
-        let prefcond = vec![cond];
-
-        // Prefix "un" with affix_id=7, condnr=0 (index into prefcond)
-        let prefix_pidx: u32 = (0u32 << 8) | 7;
-        let prefixtree = WordTree {
-            byts: vec![1, b'u', 1, b'n', 1, 0],
-            idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
-        };
-
-        let dict = Dictionary {
-            arena,
-            foldtree,
-            keeptree: WordTree::new(),
-            prefixtree,
-            charflags: CharFlags::new(),
-            regions: Vec::new(),
-            midword: Bytes::default(),
-            prefcond,
-            comp_max: MAXWLEN as u8,
-            comp_minlen: 0,
-            comp_sylmax: MAXWLEN as u8,
-            comp_options: 0,
-            comp_rules: CompoundRules::new(),
-            comp_patterns: Vec::new(),
-            syllable: Syllable::new(),
-            nobreak: false,
-            sal: None,
-        };
-
-        // "unok" -> prefix "un" + "ok", "ok" starts with 'o' which is in [ao] -> valid
-        assert!(dict.check_word(b"unok"));
-        // "unak" -> prefix "un" + "ak", "ak" starts with 'a' which is in [ao] -> valid
-        assert!(dict.check_word(b"unak"));
-        // Direct lookups also work
-        assert!(dict.check_word(b"ok"));
-        assert!(dict.check_word(b"ak"));
-    }
-
-    #[test]
-    fn test_prefix_synthetic_rare_prefix() {
-        let arena = Arena::default();
-
-        let word_flags: u32 = (WF_AFX as u32) | (3u32 << 24);
-        let foldtree = WordTree {
-            byts: vec![1, b'g', 1, b'o', 1, 0],
-            idxs: vec![0, 2, 0, 4, 0, word_flags],
-        };
-
-        // Prefix with WFP_RARE flag set
-        let prefix_pidx: u32 = (WFP_RARE << 24) | 3;
-        let prefixtree = WordTree {
-            byts: vec![1, b'a', 1, 0],
-            idxs: vec![0, 2, 0, prefix_pidx],
-        };
-
-        let dict = Dictionary {
-            arena,
-            foldtree,
-            keeptree: WordTree::new(),
-            prefixtree,
-            charflags: CharFlags::new(),
-            regions: Vec::new(),
-            midword: Bytes::default(),
-            prefcond: vec![Bytes::default()],
-            comp_max: MAXWLEN as u8,
-            comp_minlen: 0,
-            comp_sylmax: MAXWLEN as u8,
-            comp_options: 0,
-            comp_rules: CompoundRules::new(),
-            comp_patterns: Vec::new(),
-            syllable: Syllable::new(),
-            nobreak: false,
-            sal: None,
-        };
-
-        // "ago" -> prefix "a" + "go", rare prefix -> ValidRare
-        assert!(dict.check_word(b"ago"));
-        assert!(dict.check_word(b"go"));
-    }
-
-    #[test]
-    fn test_sal_parsing() {
-        let dict = load_dict();
-        let sal = dict.sal.as_ref().expect("en dict should have SAL data");
-        // English dictionary has 107 SAL rules + 1 sentinel.
-        assert_eq!(sal.items.len(), 108);
-        assert!(sal.followup);
-        assert!(!sal.collapse);
-        assert!(sal.rem_accents);
-    }
-
-    #[test]
-    fn test_sal_first_index() {
-        let dict = load_dict();
-        let sal = dict.sal.as_ref().unwrap();
-        // There should be entries in the first-byte index.
-        let count = sal.first.iter().filter(|&&x| x >= 0).count();
-        assert!(count > 0, "should have some first-byte entries");
-    }
-
-    #[test]
-    fn test_soundfold_nonempty() {
-        let dict = load_dict();
-        let result = dict.soundfold(b"hello");
-        assert!(!result.is_empty(), "soundfold should produce output for 'hello'");
-    }
-
-    #[test]
-    fn test_soundfold_similar_words() {
-        let dict = load_dict();
-        // Words that sound alike should produce similar soundfolded forms.
-        let sf_phone = dict.soundfold(b"phone");
-        let sf_fone = dict.soundfold(b"fone");
-        // Both should start with the same phonetic representation.
-        assert!(
-            !sf_phone.is_empty() && !sf_fone.is_empty(),
-            "soundfold should produce output"
-        );
-        // They should score well against each other.
-        let score = soundalike_score(&sf_phone, &sf_fone);
-        assert!(
-            score < SCORE_MAXMAX,
-            "phone and fone should be phonetically similar, got score {}",
-            score
-        );
-    }
-
-    #[test]
-    fn test_soundfold_different_words() {
-        let dict = load_dict();
-        let sf_cat = dict.soundfold(b"cat");
-        let sf_umbrella = dict.soundfold(b"umbrella");
-        // Very different words should score high.
-        let score = soundalike_score(&sf_cat, &sf_umbrella);
-        assert!(
-            score >= SCORE_MAXMAX,
-            "cat and umbrella should be phonetically very different, got score {}",
-            score
-        );
-    }
-
-    #[test]
-    fn test_soundalike_score_identical() {
-        assert_eq!(soundalike_score(b"ABC", b"ABC"), 0);
-        assert_eq!(soundalike_score(b"", b""), 0);
-    }
-
-    #[test]
-    fn test_soundalike_score_one_char_diff() {
-        // Swap: adjacent chars swapped.
-        let score = soundalike_score(b"AB", b"BA");
-        assert_eq!(score, SCORE_SWAP);
-
-        // Substitution: one char different, same length.
-        let score = soundalike_score(b"AX", b"AY");
-        assert_eq!(score, SCORE_SUBST);
-    }
-
-    #[test]
-    fn test_soundalike_score_length_diff() {
-        // One deletion.
-        let score = soundalike_score(b"AB", b"A");
-        assert_eq!(score, SCORE_DEL);
-
-        // Two deletions.
-        let score = soundalike_score(b"ABC", b"A");
-        assert_eq!(score, SCORE_DEL * 2);
-    }
-
-    #[test]
-    fn test_soundalike_score_too_different() {
-        let score = soundalike_score(b"ABCDE", b"XY");
-        assert_eq!(score, SCORE_MAXMAX);
-    }
-
-    #[test]
-    fn test_suggestions_with_sal() {
-        let dict = load_dict();
-        // The existing "sampl" -> "sample" should still work.
-        let input = b"sampl";
-        let typo = Typo { start: 0, end: 5 };
-        let suggestions = dict.suggestions(&typo, input);
-        assert!(
-            suggestions.iter().any(|s| s == b"sample"),
-            "should suggest 'sample' for 'sampl', got {:?}",
-            suggestions.iter().map(|s| String::from_utf8_lossy(s).to_string()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_char_roundtrip() {
-        let cases: &[&str] = &["hello", "caf\u{e9}", "\u{2713}"];
-        for &input in cases {
-            let chars: Vec<char> = input.chars().collect();
-            let output: String = chars.into_iter().collect();
-            assert_eq!(input, output);
         }
     }
 }

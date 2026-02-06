@@ -127,6 +127,12 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let mut syllable = Syllable::new();
     let mut nobreak = false;
     let mut sal: Option<SalInfo> = None;
+    let mut map: Option<MapInfo> = None;
+    let mut rep = Vec::new();
+    let mut rep_first = [-1i16; 256];
+    let mut repsal = Vec::new();
+    let mut repsal_first = [-1i16; 256];
+    let mut common_words = CommonWords::new();
 
     loop {
         let section_id = r.read_u8()?;
@@ -170,12 +176,24 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
             SN_SYLLABLE => {
                 read_syllable(&mut r, &mut a, len, &mut syllable)?;
             }
+            SN_REP => {
+                read_rep_section(&mut r, &mut a, len, &mut rep, &mut rep_first)?;
+            }
             SN_SAL => {
                 sal = Some(read_sal_section(&mut r, len)?);
+            }
+            SN_MAP => {
+                map = Some(read_map_section(&mut r, len)?);
+            }
+            SN_REPSAL => {
+                read_rep_section(&mut r, &mut a, len, &mut repsal, &mut repsal_first)?;
             }
             SN_NOBREAK => {
                 nobreak = true;
                 r.skip(len)?;
+            }
+            SN_WORDS => {
+                read_words_section(&mut r, &mut a, len, &mut common_words)?;
             }
             _ => {
                 if flags & SNF_REQUIRED != 0 {
@@ -197,6 +215,7 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
         prefixtree,
         charflags,
         regions,
+        region: REGION_ALL,
         midword,
         prefcond,
         comp_max,
@@ -208,6 +227,12 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
         syllable,
         nobreak,
         sal,
+        map,
+        rep,
+        rep_first,
+        repsal,
+        repsal_first,
+        common_words,
     })
 }
 
@@ -476,6 +501,113 @@ fn read_syllable(
     }
 
     Ok(())
+}
+
+fn read_rep_section(
+    r: &mut SpellReader,
+    a: &mut Arena,
+    len: usize,
+    items: &mut Vec<RepItem>,
+    first: &mut [i16; 256],
+) -> Result<(), ParseError> {
+    if len < 2 {
+        r.skip(len)?;
+        return Ok(());
+    }
+
+    let count = r.read_u16_be()? as usize;
+
+    items.reserve(count);
+    for _ in 0..count {
+        let from_len = r.read_u8()? as usize;
+        let from_data = r.read_exact(from_len)?;
+        let to_len = r.read_u8()? as usize;
+        let to_data = r.read_exact(to_len)?;
+        items.push(RepItem {
+            from: a.alloc(from_data),
+            to: a.alloc(to_data),
+        });
+    }
+
+    // Build first-byte index.
+    for i in 0..256 {
+        first[i] = -1;
+    }
+    for (i, item) in items.iter().enumerate() {
+        let b = a[item.from][0] as usize;
+        if first[b] == -1 {
+            first[b] = i as i16;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_words_section(
+    r: &mut SpellReader,
+    a: &mut Arena,
+    len: usize,
+    words: &mut CommonWords,
+) -> Result<(), ParseError> {
+    if len == 0 {
+        return Ok(());
+    }
+    let data = r.read_exact(len)?;
+
+    let word_count = data.iter().filter(|&&b| b == 0).count();
+    *words = CommonWords::with_capacity(word_count);
+
+    let mut start = 0;
+    for i in 0..data.len() {
+        if data[i] != 0 {
+            continue;
+        }
+        let word = &data[start..i];
+        start = i + 1;
+        if word.is_empty() || word.len() > MAXWLEN {
+            continue;
+        }
+        let word = a.alloc(word);
+        words.insert(a, word, 10);
+    }
+
+    Ok(())
+}
+
+fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseError> {
+    if len == 0 {
+        return Ok(MapInfo {
+            map_array: [0; 256],
+            map_hash: Vec::new(),
+        });
+    }
+
+    let data = r.read_exact(len)?;
+    let Ok(map_str) = std::str::from_utf8(data) else {
+        bail!(UnknownRequiredSection)
+    };
+
+    let mut map_array = [0u32; 256];
+    let mut map_hash = Vec::new();
+    let mut head: u32 = 0;
+
+    for c in map_str.chars() {
+        if c == '/' {
+            head = 0;
+            continue;
+        }
+        if head == 0 {
+            head = c as u32;
+        }
+        let code = c as u32;
+        if code < 256 {
+            map_array[code as usize] = head;
+        } else {
+            map_hash.push((c, head));
+        }
+    }
+
+    Ok(MapInfo { map_array, map_hash })
 }
 
 fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseError> {
