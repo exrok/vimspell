@@ -30,7 +30,7 @@ pub(crate) fn soundfold_wsal(sal: &SalInfo, input: &[u8], charflags: &CharFlags)
     let mut did_white = false;
     for ch in as_str.chars() {
         if sal.rem_accents {
-            if ch == ' ' || ch == '\t' {
+            if ch == ' ' || ch == '\t' || ch == '\u{a0}' {
                 if did_white {
                     continue;
                 }

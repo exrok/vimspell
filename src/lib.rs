@@ -3,6 +3,8 @@
 use hashbrown::HashMap;
 
 use crate::suggest::FWord;
+#[cfg(test)]
+mod nvim_compare_test;
 mod parser;
 mod soundfold;
 mod suggest;
@@ -47,7 +49,6 @@ const SCORE_DELDUP: i32 = 66;
 const SCORE_INS: i32 = 96;
 const SCORE_INSDUP: i32 = 67;
 const SCORE_SPLIT: i32 = 149;
-#[allow(dead_code)]
 const SCORE_ICASE: i32 = 52;
 const SCORE_RARE: i32 = 180;
 const SCORE_REGION: i32 = 200;
@@ -68,13 +69,11 @@ const WF_ALLCAP: u8 = 0x04;
 const WF_RARE: u8 = 0x08;
 const WF_BANNED: u8 = 0x10;
 const WF_AFX: u8 = 0x20;
-#[allow(dead_code)]
 const WF_FIXCAP: u8 = 0x40;
 const WF_KEEPCAP: u8 = 0x80;
 
 const WF_HAS_AFF: u16 = 0x0100;
 const WF_NEEDCOMP: u16 = 0x0200;
-#[allow(dead_code)]
 const WF_NOSUGGEST: u16 = 0x0400;
 const WF_COMPROOT: u16 = 0x0800;
 const WF_NOCOMPBEF: u16 = 0x1000;
@@ -563,7 +562,6 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
 
 pub(crate) struct MapInfo {
     pub(crate) map_array: [u32; 256],
-    #[allow(dead_code)]
     map_hash: Vec<(char, u32)>,
 }
 
@@ -584,7 +582,6 @@ struct SalInfo {
     first: [i32; 256],
     followup: bool,
     collapse: bool,
-    #[allow(dead_code)]
     rem_accents: bool,
 }
 
@@ -597,13 +594,11 @@ pub struct Dictionary {
     pub(crate) charflags: CharFlags,
     regions: Vec<[u8; 2]>,
     pub(crate) region: u8,
-    #[allow(dead_code)]
     midword: Bytes,
     prefcond: Vec<Bytes>,
     comp_max: u8,
     comp_minlen: u8,
     comp_sylmax: u8,
-    #[allow(dead_code)]
     comp_options: u8,
     comp_rules: CompoundRules,
     comp_patterns: Vec<(Bytes, Bytes)>,
@@ -646,6 +641,50 @@ enum WordResult {
     WrongRegion,
     Banned,
     NotFound,
+}
+
+/// Determine the capitalization type of a word, matching Neovim's captype().
+fn captype(word: &[u8], charflags: &CharFlags) -> u8 {
+    // Find first word character
+    let mut iter = word.iter().copied();
+    let first_cap;
+    let mut all_cap;
+    loop {
+        let Some(b) = iter.next() else {
+            return 0;
+        };
+        if charflags.is_word_char(b) {
+            first_cap = charflags.is_upper(b);
+            all_cap = first_cap;
+            break;
+        }
+    }
+
+    let mut past_second = false;
+    for b in iter {
+        if !charflags.is_word_char(b) {
+            continue;
+        }
+        if !charflags.is_upper(b) {
+            // UUl -> KEEPCAP
+            if past_second && all_cap {
+                return WF_KEEPCAP;
+            }
+            all_cap = false;
+        } else if !all_cap {
+            // UlU -> KEEPCAP
+            return WF_KEEPCAP;
+        }
+        past_second = true;
+    }
+
+    if all_cap {
+        WF_ALLCAP
+    } else if first_cap {
+        WF_ONECAP
+    } else {
+        0
+    }
 }
 
 impl Dictionary {
@@ -701,7 +740,7 @@ impl Dictionary {
         !self.common_words.is_empty()
     }
 
-    pub(crate) fn score_wordcount_adj(&self, score: i32, word: &[u8]) -> i32 {
+    pub(crate) fn score_wordcount_adj(&self, score: i32, word: &[u8], split: bool) -> i32 {
         let count = self.common_words.lookup(&self.arena, word);
         if count == 0 {
             return score;
@@ -713,6 +752,7 @@ impl Dictionary {
         } else {
             SCORE_COMMON3
         };
+        let bonus = if split { bonus / 2 } else { bonus };
         (score - bonus).max(0)
     }
 
@@ -741,96 +781,170 @@ impl Dictionary {
             fword[i as u8] = self.charflags.fold(b);
         }
 
-        suggest::suggest_trie_walk(self, &mut fword, word_len as u8, &mut scored, SCORE_MAXINIT);
+        let badflags = captype(word, &self.charflags);
 
-        // Rescore using sound similarity if SAL data is available.
+        suggest::suggest_trie_walk(
+            self,
+            &mut fword,
+            word_len as u8,
+            &mut scored,
+            SCORE_MAXINIT,
+            badflags,
+        );
+
+        let mut results = self.rescore_and_sort(scored, word, word_len);
+        results.truncate(25);
+        results.into_iter().map(|(w, _)| w).collect()
+    }
+
+    /// Get spelling suggestions with their scores for a typo.
+    ///
+    /// Returns `(word, score)` pairs sorted by score (lowest = best).
+    pub fn suggestions_scored(&self, typo: &Typo, input: &[u8]) -> Vec<(Vec<u8>, i32)> {
+        let word = typo.word(input);
+        if word.is_empty() || word.len() > MAXWLEN {
+            return Vec::new();
+        }
+
+        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
+        let word_len = word.len();
+
+        let mut fword = FWord([0u8; MAXWLEN_EXT]);
+        for (i, &b) in word.iter().enumerate() {
+            fword[i as u8] = self.charflags.fold(b);
+        }
+
+        let badflags = captype(word, &self.charflags);
+
+        suggest::suggest_trie_walk(
+            self,
+            &mut fword,
+            word_len as u8,
+            &mut scored,
+            SCORE_MAXINIT,
+            badflags,
+        );
+
+        let mut results = self.rescore_and_sort(scored, word, word_len);
+        results.truncate(25);
+        results
+    }
+
+    /// Rescore suggestions using SAL sound similarity and sort by
+    /// (score, altscore, case-insensitive word) matching Neovim's sug_compare.
+    fn rescore_and_sort(
+        &self,
+        scored: HashMap<Vec<u8>, i32>,
+        word: &[u8],
+        word_len: usize,
+    ) -> Vec<(Vec<u8>, i32)> {
+        // (word, score, altscore) - altscore is SAL sound score for tie-breaking
+        let mut results: Vec<(Vec<u8>, i32, i32)> =
+            scored.into_iter().map(|(w, s)| (w, s, 0)).collect();
+
         if self.sal.is_some() {
-            // Fold the typo word for soundfolding.
+            // Soundfold the bad word (case-folded) — matches Neovim's
+            // cached su_sal_badword computed from su_fbadword.
             let mut folded = [0u8; MAXWLEN];
             for (i, &b) in word.iter().enumerate() {
                 folded[i] = self.charflags.fold(b);
             }
             let bad_sound = self.soundfold(&folded[..word_len]);
 
-            // Build alternative soundfolds via REPSAL rules.
-            let mut repsal_sounds: Vec<Vec<u8>> = Vec::new();
-            if !self.repsal.is_empty() && !bad_sound.is_empty() {
-                let bslen = bad_sound.len();
-                let mut buf = [0u8; MAXWLEN * 2];
-                for i in 0..bslen {
-                    let first = self.repsal_first[bad_sound[i] as usize];
-                    if first < 0 {
-                        continue;
-                    }
-                    let mut ri = first as usize;
-                    while ri < self.repsal.len() {
-                        let item = &self.repsal[ri];
-                        let from = &self.arena[item.from];
-                        if from[0] != bad_sound[i] {
-                            break;
-                        }
-                        if i + from.len() <= bslen && bad_sound[i..i + from.len()] == *from {
-                            let to = &self.arena[item.to];
-                            let new_len = bslen - from.len() + to.len();
-                            if new_len <= MAXWLEN {
-                                buf[..i].copy_from_slice(&bad_sound[..i]);
-                                buf[i..i + to.len()].copy_from_slice(to);
-                                buf[i + to.len()..new_len]
-                                    .copy_from_slice(&bad_sound[i + from.len()..bslen]);
-                                repsal_sounds.push(buf[..new_len].to_vec());
-                            }
-                        }
-                        ri += 1;
-                    }
-                }
-            }
-
             if !bad_sound.is_empty() {
-                for (cand_word, score) in &mut scored {
+                for (cand_word, score, altscore) in &mut results {
+                    // Case-fold the candidate, then soundfold it — matches
+                    // Neovim's stp_sal_score calling spell_soundfold(folded=false).
                     let mut cand_folded = [0u8; MAXWLEN];
                     for (i, &b) in cand_word.iter().enumerate() {
                         cand_folded[i] = self.charflags.fold(b);
                     }
                     let good_sound = self.soundfold(&cand_folded[..cand_word.len()]);
-                    let mut sound_score = soundfold::soundalike_score(&good_sound, &bad_sound);
-                    for alt in &repsal_sounds {
-                        let alt_score = soundfold::soundalike_score(&good_sound, alt);
-                        if alt_score < sound_score {
-                            sound_score = alt_score;
-                        }
-                    }
+                    let sound_score = soundfold::soundalike_score(&good_sound, &bad_sound);
                     let sound_score = if sound_score >= SCORE_MAXMAX {
                         SCORE_INS * 3
                     } else {
                         sound_score
                     };
+                    *altscore = sound_score;
                     *score = (3 * *score + sound_score) / 4;
                 }
             }
         }
 
-        if !self.common_words.is_empty() {
-            for (cand_word, score) in &mut scored {
-                *score = self.score_wordcount_adj(*score, cand_word);
+        results.sort_by(|(w1, s1, a1), (w2, s2, a2)| {
+            s1.cmp(s2)
+                .then_with(|| a1.cmp(a2))
+                .then_with(|| w1.to_ascii_lowercase().cmp(&w2.to_ascii_lowercase()))
+        });
+
+        results.into_iter().map(|(w, s, _)| (w, s)).collect()
+    }
+
+    /// Debug: get full scoring details for all candidates (pre-SAL, SAL, post-SAL).
+    /// Returns (word, pre_sal_score, sal_score, final_score) sorted by final score.
+    #[cfg(test)]
+    fn suggestions_debug(&self, typo: &Typo, input: &[u8]) -> Vec<(Vec<u8>, i32, i32, i32)> {
+        let word = typo.word(input);
+        if word.is_empty() || word.len() > MAXWLEN {
+            return Vec::new();
+        }
+
+        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
+        let word_len = word.len();
+
+        let mut fword = FWord([0u8; MAXWLEN_EXT]);
+        for (i, &b) in word.iter().enumerate() {
+            fword[i as u8] = self.charflags.fold(b);
+        }
+
+        let badflags = captype(word, &self.charflags);
+
+        suggest::suggest_trie_walk(
+            self,
+            &mut fword,
+            word_len as u8,
+            &mut scored,
+            SCORE_MAXINIT,
+            badflags,
+        );
+
+        // (word, pre_sal, sal_score, final_score)
+        let mut results: Vec<(Vec<u8>, i32, i32, i32)> =
+            scored.into_iter().map(|(w, s)| (w, s, 0, s)).collect();
+
+        if self.sal.is_some() {
+            let mut folded = [0u8; MAXWLEN];
+            for (i, &b) in word.iter().enumerate() {
+                folded[i] = self.charflags.fold(b);
+            }
+            let bad_sound = self.soundfold(&folded[..word_len]);
+
+            if !bad_sound.is_empty() {
+                for (cand_word, pre_sal, sal_score, final_score) in &mut results {
+                    let mut cand_folded = [0u8; MAXWLEN];
+                    for (i, &b) in cand_word.iter().enumerate() {
+                        cand_folded[i] = self.charflags.fold(b);
+                    }
+                    let good_sound = self.soundfold(&cand_folded[..cand_word.len()]);
+                    let ss = soundfold::soundalike_score(&good_sound, &bad_sound);
+                    let ss = if ss >= SCORE_MAXMAX {
+                        SCORE_INS * 3
+                    } else {
+                        ss
+                    };
+                    *sal_score = ss;
+                    *final_score = (3 * *pre_sal + ss) / 4;
+                }
             }
         }
-        // let mut top_ten_scores = [0i32; 10];
-        // if scored.len() > 15 {
-        //     for score in scored.values() {
-        //         for s in &mut top_ten_scores {
-        //             if *s < *score {
-        //                 *s = *score;
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // }
-        // todo optimize top ten top ten
-        // println!("{:#?}", scored);
-        let mut scored: Vec<_> = scored.into_iter().collect();
-        scored.sort_by_key(|(_, s)| *s);
-        scored.truncate(10);
-        scored.into_iter().map(|(w, _)| w).collect()
+
+        results.sort_by(|(w1, _, _, s1), (w2, _, _, s2)| {
+            s1.cmp(s2)
+                .then_with(|| w1.to_ascii_lowercase().cmp(&w2.to_ascii_lowercase()))
+        });
+
+        results
     }
 
     /// Check if a single word is spelled correctly.

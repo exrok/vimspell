@@ -1222,15 +1222,17 @@ fn test_score_wordcount_adj_thresholds() {
     };
 
     // count=5 < SCORE_THRES2(10): bonus = SCORE_COMMON1(30)
-    assert_eq!(dict.score_wordcount_adj(100, b"low"), 70);
+    assert_eq!(dict.score_wordcount_adj(100, b"low", false), 70);
     // count=10 >= SCORE_THRES2, < SCORE_THRES3(100): bonus = SCORE_COMMON2(40)
-    assert_eq!(dict.score_wordcount_adj(100, b"mid"), 60);
+    assert_eq!(dict.score_wordcount_adj(100, b"mid", false), 60);
     // count=100 >= SCORE_THRES3: bonus = SCORE_COMMON3(50)
-    assert_eq!(dict.score_wordcount_adj(100, b"high"), 50);
+    assert_eq!(dict.score_wordcount_adj(100, b"high", false), 50);
     // unknown word: no adjustment
-    assert_eq!(dict.score_wordcount_adj(100, b"unknown"), 100);
+    assert_eq!(dict.score_wordcount_adj(100, b"unknown", false), 100);
     // bonus clamped to 0
-    assert_eq!(dict.score_wordcount_adj(20, b"high"), 0);
+    assert_eq!(dict.score_wordcount_adj(20, b"high", false), 0);
+    // split: half bonus
+    assert_eq!(dict.score_wordcount_adj(100, b"high", true), 75);
 }
 
 #[test]
@@ -1318,9 +1320,24 @@ fn test_suggest_insertion() {
 fn bench_suggest_perf() {
     let dict = load_dict();
     let typos: &[&[u8]] = &[
-        b"sampl", b"hte", b"teh", b"helllo", b"helo", b"inthe", b"wrold", b"fone",
-        b"accomodation", b"definately", b"occured", b"recieve", b"seperate", b"untill", b"wich",
-        b"becuase", b"thier", b"foriegn",
+        b"sampl",
+        b"hte",
+        b"teh",
+        b"helllo",
+        b"helo",
+        b"inthe",
+        b"wrold",
+        b"fone",
+        b"accomodation",
+        b"definately",
+        b"occured",
+        b"recieve",
+        b"seperate",
+        b"untill",
+        b"wich",
+        b"becuase",
+        b"thier",
+        b"foriegn",
     ];
 
     for &typo_word in typos {
@@ -1336,6 +1353,37 @@ fn bench_suggest_perf() {
             std::str::from_utf8(typo_word).unwrap(),
             suggestions.len(),
             elapsed.as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn debug_inthe_deep_scoring() {
+    let dict = load_dict();
+    let typo_word = b"inthe";
+    let t = Typo {
+        start: 0,
+        end: typo_word.len() as u32,
+    };
+    let results = dict.suggestions_debug(&t, typo_word);
+
+    println!("=== Rust deep ranking for 'inthe' ({} candidates) ===", results.len());
+    for (i, (word, pre_sal, sal, final_score)) in results.iter().enumerate() {
+        let w = std::str::from_utf8(word).unwrap_or("???");
+        let marker = match w {
+            "in thee" | "on the" | "in they" => " <-- MISSING in Rust top25",
+            "lithe" | "tithe" | "withe" => " <-- EXTRA in Rust top25",
+            _ => "",
+        };
+        println!(
+            "{:>3}: {:<20} pre_sal={:<4} sal={:<4} final={:<4}{}",
+            i + 1,
+            w,
+            pre_sal,
+            sal,
+            final_score,
+            marker,
         );
     }
 }

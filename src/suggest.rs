@@ -6,6 +6,7 @@ use super::Dictionary;
 use super::MAXWLEN;
 use super::SCORE_DEL;
 use super::SCORE_DELDUP;
+use super::SCORE_ICASE;
 use super::SCORE_INS;
 use super::SCORE_INSDUP;
 use super::SCORE_RARE;
@@ -16,11 +17,15 @@ use super::SCORE_SPLIT;
 use super::SCORE_SUBST;
 use super::SCORE_SWAP;
 use super::SCORE_SWAP3;
+use super::WF_ALLCAP;
 use super::WF_BANNED;
+use super::WF_KEEPCAP;
 use super::WF_NEEDCOMP;
 use super::WF_NOSUGGEST;
+use super::WF_ONECAP;
 use super::WF_RARE;
 use super::WF_REGION;
+use super::WordTree;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -60,6 +65,7 @@ struct TryState {
     delidx: u8,
     split_tword_off: u8,
     split_fidx: u8,
+    split_word_flags: u32,
 }
 
 impl Default for TryState {
@@ -76,6 +82,7 @@ impl Default for TryState {
             delidx: 0,
             split_tword_off: 0,
             split_fidx: 0,
+            split_word_flags: 0,
         }
     }
 }
@@ -171,12 +178,180 @@ unsafe fn similar_chars(map_array: *const u32, c1: u8, c2: u8) -> bool {
     }
 }
 
+/// Check if the suggestion's case is valid given the bad word's case.
+/// Matches Neovim's spell_valid_case().
+#[inline]
+fn spell_valid_case(word_flags: u8, tree_flags: u8) -> bool {
+    (word_flags == WF_ALLCAP && (tree_flags & super::WF_FIXCAP) == 0)
+        || ((tree_flags & (WF_ALLCAP | WF_KEEPCAP)) == 0
+            && ((tree_flags & WF_ONECAP) == 0 || (word_flags & WF_ONECAP) != 0))
+}
+
+/// Compute the captype of the result after make_case_word is applied.
+#[inline]
+fn result_captype(badflags: u8, word_flags: u32) -> u8 {
+    if word_flags as u8 & WF_KEEPCAP != 0 {
+        return WF_KEEPCAP;
+    }
+    let combined = badflags as u32 | word_flags;
+    if combined & WF_ALLCAP as u32 != 0 {
+        WF_ALLCAP
+    } else if combined & WF_ONECAP as u32 != 0 {
+        WF_ONECAP
+    } else {
+        0
+    }
+}
+
+/// Apply case transformation and append the result to `out`.
+/// Matches Neovim's make_case_word().
+fn apply_case(out: &mut Vec<u8>, word: &[u8], badflags: u8, word_flags: u32) {
+    let combined = badflags as u32 | word_flags;
+    if combined & WF_ALLCAP as u32 != 0 {
+        for &b in word {
+            out.push(b.to_ascii_uppercase());
+        }
+    } else if combined & WF_ONECAP as u32 != 0 {
+        if let Some((&first, rest)) = word.split_first() {
+            out.push(first.to_ascii_uppercase());
+            out.extend_from_slice(rest);
+        }
+    } else {
+        out.extend_from_slice(word);
+    }
+}
+
+/// Find the keep-case version of a word from the keeptree.
+/// Tries both lowercase and uppercase at each position to find the original casing.
+fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
+    if keeptree.is_empty() || fword.is_empty() {
+        return None;
+    }
+
+    let byts = &keeptree.byts;
+    let idxs = &keeptree.idxs;
+    let fword_len = fword.len();
+
+    let uword: Vec<u8> = fword.iter().map(|&b| b.to_ascii_uppercase()).collect();
+
+    // State arrays for iterative DFS (matching Neovim's find_keepcap_word)
+    let mut arr = vec![0usize; fword_len + 1];
+    let mut rnd = vec![0u8; fword_len + 1];
+    let mut kword = vec![0u8; fword_len];
+
+    let mut depth: i32 = 0;
+    arr[0] = 0;
+    rnd[0] = 0;
+
+    while depth >= 0 {
+        let d = depth as usize;
+
+        if d == fword_len {
+            // Check for word-end (NUL byte) at this position
+            let ai = arr[d];
+            if ai < byts.len() {
+                let len = byts[ai] as usize;
+                if len > 0 && ai + 1 < byts.len() && byts[ai + 1] == 0 {
+                    return Some(kword.clone());
+                }
+            }
+            depth -= 1;
+            continue;
+        }
+
+        rnd[d] += 1;
+
+        let c = match rnd[d] {
+            1 => fword[d],
+            2 => {
+                if fword[d] == uword[d] {
+                    depth -= 1;
+                    continue;
+                }
+                uword[d]
+            }
+            _ => {
+                depth -= 1;
+                continue;
+            }
+        };
+
+        let ai = arr[d];
+        if ai >= byts.len() {
+            if rnd[d] >= 2 || fword[d] == uword[d] {
+                depth -= 1;
+            }
+            continue;
+        }
+
+        let len = byts[ai] as usize;
+        let base = ai + 1;
+
+        // Skip NUL entries
+        let mut nul_count = 0;
+        while nul_count < len && base + nul_count < byts.len() && byts[base + nul_count] == 0 {
+            nul_count += 1;
+        }
+
+        // Binary search among non-NUL siblings
+        let search_start = base + nul_count;
+        let search_end = base + len;
+
+        let mut lo = search_start;
+        let mut hi = search_end;
+        let mut found = false;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if mid >= byts.len() {
+                break;
+            }
+            if byts[mid] == c {
+                kword[d] = c;
+                arr[d + 1] = idxs[mid] as usize;
+                rnd[d + 1] = 0;
+                depth += 1;
+                found = true;
+                break;
+            } else if byts[mid] < c {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if !found && (rnd[d] >= 2 || fword[d] == uword[d]) {
+            depth -= 1;
+        }
+    }
+
+    None
+}
+
+/// Build a properly-cased suggestion word, appending to `out`.
+fn build_cased_word(
+    keeptree: &WordTree,
+    word: &[u8],
+    badflags: u8,
+    word_flags: u32,
+    out: &mut Vec<u8>,
+) {
+    if word_flags as u8 & WF_KEEPCAP != 0 {
+        if let Some(kw) = find_keepcap_word(keeptree, word) {
+            out.extend_from_slice(&kw);
+            return;
+        }
+    }
+    apply_case(out, word, badflags, word_flags);
+}
+
 pub(crate) fn suggest_trie_walk(
     dict: &Dictionary,
     fword: &mut FWord,
     fword_len: u8,
     scored: &mut HashMap<Vec<u8>, i32>,
     maxscore: i32,
+    badflags: u8,
 ) {
     if dict.foldtree.byts.is_empty() {
         return;
@@ -239,7 +414,7 @@ pub(crate) fn suggest_trie_walk(
                     let fword_ends = fidx >= eff_fword_len;
                     let tword_len = sp(stack, d).tword_len as usize;
 
-                    let goodword_ends = !(fword_ends && (flags as u16 & WF_NEEDCOMP != 0));
+                    let goodword_ends = (flags as u16 & WF_NEEDCOMP) == 0;
 
                     if (flags as u8) & WF_BANNED != 0 {
                         continue;
@@ -256,22 +431,50 @@ pub(crate) fn suggest_trie_walk(
                         newscore += SCORE_RARE;
                     }
 
-                    if fword_ends
-                        && goodword_ends
-                        && sp(stack, d).fidx >= sp(stack, d).fidxtry
-                    {
-                        let total = sp(stack, d).score + newscore;
+                    // SCORE_ICASE penalty for case mismatch
+                    let rct = result_captype(badflags, flags);
+                    if !spell_valid_case(badflags, rct) {
+                        newscore += SCORE_ICASE;
+                    }
+
+                    if fword_ends && goodword_ends && sp(stack, d).fidx >= sp(stack, d).fidxtry {
+                        let split_off = sp(stack, d).split_tword_off as usize;
+                        let is_split = split_off > 0;
+
+                        // Build cased suggestion word
+                        let mut word = Vec::with_capacity(tword_len + 2);
+                        if is_split {
+                            build_cased_word(
+                                &dict.keeptree,
+                                &tword[..split_off],
+                                badflags,
+                                sp(stack, d).split_word_flags,
+                                &mut word,
+                            );
+                            word.push(b' ');
+                        }
+                        let second_start = word.len();
+                        build_cased_word(
+                            &dict.keeptree,
+                            &tword[if is_split { split_off } else { 0 }..tword_len],
+                            badflags,
+                            flags,
+                            &mut word,
+                        );
+
+                        // Apply common word bonus (before SAL, matching Neovim)
+                        let total = if !dict.common_words.is_empty() {
+                            dict.score_wordcount_adj(
+                                sp(stack, d).score + newscore,
+                                &word[second_start..],
+                                is_split,
+                            )
+                        } else {
+                            sp(stack, d).score + newscore
+                        };
+
                         if total < maxscore {
-                            let split_off = sp(stack, d).split_tword_off as usize;
-                            if split_off > 0 {
-                                let mut word = Vec::with_capacity(tword_len + 1);
-                                word.extend_from_slice(&tword[..split_off]);
-                                word.push(b' ');
-                                word.extend_from_slice(&tword[split_off..tword_len]);
-                                add_suggestion(scored, &word, total);
-                            } else {
-                                add_suggestion(scored, &tword[..tword_len], total);
-                            }
+                            add_suggestion(scored, &word, total);
 
                             if scored.len() > SUG_MAX_COUNT {
                                 maxscore = cleanup_suggestions(scored, maxscore);
@@ -282,11 +485,14 @@ pub(crate) fn suggest_trie_walk(
                     if !fword_ends
                         && goodword_ends
                         && sp(stack, d).split_tword_off == 0
-                        && tword_len >= 2
-                        && (eff_fword_len - fidx) >= 2
                         && sp(stack, d).fidx >= sp(stack, d).fidxtry
                     {
-                        let extra = newscore + SCORE_SPLIT;
+                        let mut extra = newscore + SCORE_SPLIT;
+                        // Give a bonus to common first words at the split point
+                        if !dict.common_words.is_empty() {
+                            extra =
+                                dict.score_wordcount_adj(extra, &tword[..tword_len], true);
+                        }
                         if can_go_deeper(stack, d, extra, maxscore) {
                             let prev_fidx = sp(stack, d).fidx;
                             go_deeper(stack, d, extra);
@@ -295,6 +501,7 @@ pub(crate) fn suggest_trie_walk(
                             sp(stack, sd).arridx = 0;
                             sp(stack, sd).split_tword_off = tword_len as u8;
                             sp(stack, sd).split_fidx = prev_fidx;
+                            sp(stack, sd).split_word_flags = flags;
                             continue;
                         }
                     }

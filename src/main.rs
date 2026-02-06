@@ -63,9 +63,24 @@ fn dump_compound_words() {
 fn profile_suggestions() {
     let dict = load_dict();
     let typos: &[&[u8]] = &[
-        b"sampl", b"hte", b"teh", b"helllo", b"helo", b"inthe", b"wrold", b"fone",
-        b"accomodation", b"definately", b"occured", b"recieve", b"seperate", b"untill", b"wich",
-        b"becuase", b"thier", b"foriegn",
+        b"sampl",
+        b"hte",
+        b"teh",
+        b"helllo",
+        b"helo",
+        b"inthe",
+        b"wrold",
+        b"fone",
+        b"accomodation",
+        b"definately",
+        b"occured",
+        b"recieve",
+        b"seperate",
+        b"untill",
+        b"wich",
+        b"becuase",
+        b"thier",
+        b"foriegn",
     ];
 
     for _ in 0..20 {
