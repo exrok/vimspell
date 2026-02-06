@@ -8,11 +8,7 @@ fn main() {
     match command {
         "compound-info" => show_compound_info(),
         "compound-words" => dump_compound_words(),
-        "check" => {
-            for _ in 0..1000 {
-                spell_check()
-            }
-        }
+        "check" => spell_check(),
         _ => {
             eprintln!("Usage: vim-spell [compound-info|compound-words|check]");
             std::process::exit(1);

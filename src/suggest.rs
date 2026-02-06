@@ -1,5 +1,7 @@
 use hashbrown::HashMap;
 
+use crate::MAXWLEN_EXT;
+
 use super::Dictionary;
 use super::MAXWLEN;
 use super::SCORE_DEL;
@@ -78,7 +80,7 @@ impl Default for TryState {
     }
 }
 
-fn go_deeper(stack: &mut [TryState; MAXWLEN], depth: usize, score_add: i32) {
+fn go_deeper(stack: &mut [TryState; MAXWLEN_EXT], depth: usize, score_add: i32) {
     let parent = stack[depth];
     let child = &mut stack[depth + 1];
     *child = parent;
@@ -88,7 +90,7 @@ fn go_deeper(stack: &mut [TryState; MAXWLEN], depth: usize, score_add: i32) {
     child.flags = 0;
 }
 
-fn can_go_deeper(stack: &[TryState; MAXWLEN], depth: usize, add: i32, maxscore: i32) -> bool {
+fn can_go_deeper(stack: &[TryState; MAXWLEN_EXT], depth: usize, add: i32, maxscore: i32) -> bool {
     depth < MAXWLEN - 1 && stack[depth].score + add < maxscore
 }
 
@@ -107,11 +109,26 @@ fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
         }
     }
 }
+pub struct FWord(pub [u8; MAXWLEN_EXT]);
+impl std::ops::Index<u8> for FWord {
+    type Output = u8;
+    #[inline(always)]
+    fn index(&self, index: u8) -> &Self::Output {
+        &self.0[index as usize]
+    }
+}
+
+impl std::ops::IndexMut<u8> for FWord {
+    #[inline(always)]
+    fn index_mut(&mut self, index: u8) -> &mut Self::Output {
+        &mut self.0[index as usize]
+    }
+}
 
 pub(crate) fn suggest_trie_walk(
     dict: &Dictionary,
-    fword: &mut [u8; MAXWLEN],
-    fword_len: usize,
+    fword: &mut FWord,
+    fword_len: u8,
     scored: &mut HashMap<Vec<u8>, i32>,
     maxscore: i32,
 ) {
@@ -122,12 +139,18 @@ pub(crate) fn suggest_trie_walk(
     let byts = &dict.foldtree.byts;
     let idxs = &dict.foldtree.idxs;
 
-    let mut tword = [0u8; MAXWLEN];
-    let mut stack = [TryState::default(); MAXWLEN];
-    let mut depth: i32 = 0;
+    debug_assert_eq!(
+        MAXWLEN_EXT,
+        u8::MAX as usize,
+        "u8::MAX size implies u8 index always succeeds removing branch"
+    );
+    let mut tword = [0u8; MAXWLEN_EXT];
+    let mut stack = [TryState::default(); MAXWLEN_EXT];
+    let mut depth: u8 = 0;
     let mut repextra: i32 = 0;
+    let mut eff_fword_len = fword_len;
 
-    while depth >= 0 {
+    loop {
         let d = depth as usize;
         match stack[d].state {
             State::Start => {
@@ -152,8 +175,8 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let fidx = stack[d].fidx as usize;
-                let fword_ends = fidx >= fword_len;
+                let fidx = stack[d].fidx;
+                let fword_ends = fidx >= eff_fword_len;
                 let tword_len = stack[d].tword_len as usize;
 
                 let goodword_ends = !(fword_ends && (flags as u16 & WF_NEEDCOMP != 0));
@@ -193,7 +216,7 @@ pub(crate) fn suggest_trie_walk(
                     && goodword_ends
                     && stack[d].split_tword_off == 0
                     && tword_len >= 2
-                    && (fword_len - fidx) >= 2
+                    && (eff_fword_len - fidx) >= 2
                     && stack[d].fidx >= stack[d].fidxtry
                 {
                     let extra = newscore + SCORE_SPLIT;
@@ -210,7 +233,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::EndNul => {
-                if stack[d].fidx as usize >= fword_len {
+                if stack[d].fidx >= eff_fword_len {
                     stack[d].state = State::Del;
                 } else {
                     stack[d].state = State::Plain;
@@ -238,10 +261,10 @@ pub(crate) fn suggest_trie_walk(
                 stack[d].curi += 1;
                 let c = byts[idx];
 
-                let fidx = stack[d].fidx as usize;
-                let newscore = if fidx < fword_len && c == fword[fidx] {
+                let fidx = stack[d].fidx;
+                let newscore = if fidx < eff_fword_len && c == fword[fidx] {
                     0
-                } else if fidx >= fword_len {
+                } else if fidx >= eff_fword_len {
                     SCORE_INS
                 } else if dict.similar_chars(fword[fidx], c) {
                     SCORE_SIMILAR
@@ -251,8 +274,7 @@ pub(crate) fn suggest_trie_walk(
 
                 if newscore != 0
                     && (stack[d].fidx < stack[d].fidxtry
-                        || ((stack[d].flags & TSF_DIDDEL) != 0
-                            && c == fword[stack[d].delidx as usize]))
+                        || ((stack[d].flags & TSF_DIDDEL) != 0 && c == fword[stack[d].delidx]))
                 {
                     continue;
                 }
@@ -261,14 +283,14 @@ pub(crate) fn suggest_trie_walk(
                     go_deeper(&mut stack, d, newscore);
                     depth += 1;
                     let sd = depth as usize;
-                    if fidx < fword_len {
+                    if fidx < eff_fword_len {
                         stack[sd].fidx += 1;
                     }
                     tword[stack[sd].tword_len as usize] = c;
                     stack[sd].tword_len += 1;
                     stack[sd].arridx = idxs[idx];
 
-                    if newscore == SCORE_SUBST && fidx < fword_len {
+                    if newscore == SCORE_SUBST && fidx < eff_fword_len {
                         if dict.similar_chars(fword[fidx], c) {
                             stack[sd].score -= SCORE_SUBST - SCORE_SIMILAR;
                         }
@@ -280,8 +302,8 @@ pub(crate) fn suggest_trie_walk(
                 stack[d].state = State::InsPrep;
                 stack[d].curi = 1;
 
-                let fidx = stack[d].fidx as usize;
-                if fidx >= fword_len || stack[d].fidx < stack[d].fidxtry {
+                let fidx = stack[d].fidx;
+                if fidx >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
                     continue;
                 }
 
@@ -299,8 +321,8 @@ pub(crate) fn suggest_trie_walk(
                     stack[sd].delidx = stack[d].fidx;
                     stack[sd].fidx += 1;
 
-                    let new_fidx = stack[sd].fidx as usize;
-                    if new_fidx < fword_len && fword[new_fidx] == fword[fidx] {
+                    let new_fidx = stack[sd].fidx;
+                    if new_fidx < eff_fword_len && fword[new_fidx] == fword[fidx] {
                         stack[sd].score -= SCORE_DEL - SCORE_DELDUP;
                     }
                 }
@@ -357,8 +379,8 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let fidx = stack[d].fidx as usize;
-                if fidx < fword_len && c == fword[fidx] {
+                let fidx = stack[d].fidx;
+                if fidx < eff_fword_len && c == fword[fidx] {
                     continue;
                 }
 
@@ -378,8 +400,8 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Swap => {
-                let fidx = stack[d].fidx as usize;
-                if fidx + 1 >= fword_len || stack[d].fidx < stack[d].fidxtry {
+                let fidx = stack[d].fidx;
+                if fidx + 1 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
                     stack[d].state = State::RepIni;
                     continue;
                 }
@@ -405,7 +427,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Unswap => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 let c1 = fword[fidx];
                 let c2 = fword[fidx + 1];
                 fword[fidx] = c2;
@@ -414,8 +436,8 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Swap3 => {
-                let fidx = stack[d].fidx as usize;
-                if fidx + 2 >= fword_len || stack[d].fidx < stack[d].fidxtry {
+                let fidx = stack[d].fidx;
+                if fidx + 2 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
                     stack[d].state = State::RepIni;
                     continue;
                 }
@@ -441,13 +463,13 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Unswap3 => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 let c1 = fword[fidx];
                 let c3 = fword[fidx + 2];
                 fword[fidx] = c3;
                 fword[fidx + 2] = c1;
 
-                if fidx + 2 < fword_len {
+                if fidx + 2 < eff_fword_len {
                     stack[d].state = State::Rot3l;
                 } else {
                     stack[d].state = State::RepIni;
@@ -455,7 +477,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Rot3l => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 if can_go_deeper(&stack, d, SCORE_SWAP3, maxscore) {
                     stack[d].state = State::UnRot3l;
                     let a = fword[fidx];
@@ -473,7 +495,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::UnRot3l => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 let b = fword[fidx];
                 let c = fword[fidx + 1];
                 let a = fword[fidx + 2];
@@ -485,7 +507,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Rot3r => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 if can_go_deeper(&stack, d, SCORE_SWAP3, maxscore) {
                     stack[d].state = State::UnRot3r;
                     let a = fword[fidx];
@@ -503,7 +525,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::UnRot3r => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 let c = fword[fidx];
                 let a = fword[fidx + 1];
                 let b = fword[fidx + 2];
@@ -523,8 +545,8 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let fidx = stack[d].fidx as usize;
-                if fidx >= fword_len {
+                let fidx = stack[d].fidx;
+                if fidx >= eff_fword_len {
                     stack[d].state = State::Final;
                     continue;
                 }
@@ -540,7 +562,7 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Rep => {
-                let fidx = stack[d].fidx as usize;
+                let fidx = stack[d].fidx;
                 let curi = stack[d].curi as usize;
 
                 if curi >= dict.rep.len() {
@@ -548,8 +570,8 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let from_len = dict.arena[dict.rep[curi].from].len();
-                let to_len = dict.arena[dict.rep[curi].to].len();
+                let from_len = dict.rep[curi].from.len();
+                let to_len = dict.rep[curi].to.len();
                 let first_byte = dict.arena[dict.rep[curi].from][0];
 
                 if first_byte != fword[fidx] {
@@ -559,13 +581,12 @@ pub(crate) fn suggest_trie_walk(
 
                 stack[d].curi += 1;
 
-                let effective_len = (fword_len as i32 + repextra) as usize;
-                if fidx + from_len > effective_len {
+                if (fidx as usize) + from_len > eff_fword_len as usize {
                     continue;
                 }
 
-                let from_bytes: Vec<u8> = dict.arena[dict.rep[curi].from].to_vec();
-                if fword[fidx..fidx + from_len] != *from_bytes {
+                let from_bytes = &dict.arena[dict.rep[curi].from];
+                if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
                     continue;
                 }
 
@@ -573,21 +594,24 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let to_bytes: Vec<u8> = dict.arena[dict.rep[curi].to].to_vec();
+                let to_bytes = &dict.arena[dict.rep[curi].to];
 
                 stack[d].state = State::RepUndo;
 
                 if from_len != to_len {
+                    let fidx = fidx as usize;
                     let tail_start = fidx + from_len;
-                    let tail_end = effective_len;
+                    let tail_end = eff_fword_len as usize;
                     if tail_start <= tail_end && fidx + to_len + (tail_end - tail_start) < MAXWLEN {
-                        fword.copy_within(tail_start..tail_end, fidx + to_len);
+                        fword.0.copy_within(tail_start..tail_end, fidx + to_len);
                         repextra += to_len as i32 - from_len as i32;
+                        eff_fword_len = (fword_len as i32 + repextra) as u8;
                     } else {
                         continue;
                     }
                 }
-                fword[fidx..fidx + to_len].copy_from_slice(&to_bytes);
+                let fidx = fidx as usize;
+                fword.0[fidx..fidx + to_len].copy_from_slice(&to_bytes);
 
                 go_deeper(&mut stack, d, SCORE_REP);
                 depth += 1;
@@ -599,25 +623,30 @@ pub(crate) fn suggest_trie_walk(
                 let curi = (stack[d].curi - 1) as usize;
 
                 if curi < dict.rep.len() {
-                    let from_len = dict.arena[dict.rep[curi].from].len();
-                    let to_len = dict.arena[dict.rep[curi].to].len();
-                    let from_bytes: Vec<u8> = dict.arena[dict.rep[curi].from].to_vec();
+                    let from_len = dict.rep[curi].from.len();
+                    let to_len = dict.rep[curi].to.len();
+                    let from_bytes = &dict.arena[dict.rep[curi].from];
 
                     if from_len != to_len {
                         let tail_start = fidx + to_len;
-                        let tail_end = (fword_len as i32 + repextra) as usize;
+                        let tail_end = eff_fword_len as usize;
                         if tail_start <= tail_end {
-                            fword.copy_within(tail_start..tail_end, fidx + from_len);
+                            fword.0.copy_within(tail_start..tail_end, fidx + from_len);
                             repextra -= to_len as i32 - from_len as i32;
+                            eff_fword_len = (fword_len as i32 + repextra) as u8;
                         }
                     }
-                    fword[fidx..fidx + from_len].copy_from_slice(&from_bytes);
+                    let fidx = fidx as usize;
+                    fword.0[fidx..fidx + from_len].copy_from_slice(&from_bytes);
                 }
 
                 stack[d].state = State::Rep;
             }
 
             State::Final => {
+                if depth == 0 {
+                    break;
+                }
                 depth -= 1;
             }
         }

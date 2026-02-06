@@ -1,6 +1,8 @@
 //! # vim-spell: High performance spell-check with vim's spl dictionary support.
 
 use hashbrown::HashMap;
+
+use crate::suggest::FWord;
 mod parser;
 mod soundfold;
 mod suggest;
@@ -12,6 +14,8 @@ const VIMSPELLVERSION: u8 = 50;
 
 /// Maximum word length in bytes. Matches neovim's MAXWLEN.
 const MAXWLEN: usize = 254;
+/// Maximum world extended to u8::MAX, as an optimization
+const MAXWLEN_EXT: usize = 255;
 
 const SN_REGION: u8 = 0;
 const SN_CHARFLAGS: u8 = 1;
@@ -409,6 +413,10 @@ pub(crate) struct Bytes {
 }
 
 impl Bytes {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
     fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -739,12 +747,12 @@ impl Dictionary {
         let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
         let word_len = word.len();
 
-        let mut fword = [0u8; MAXWLEN];
+        let mut fword = FWord([0u8; MAXWLEN_EXT]);
         for (i, &b) in word.iter().enumerate() {
-            fword[i] = self.charflags.fold(b);
+            fword[i as u8] = self.charflags.fold(b);
         }
 
-        suggest::suggest_trie_walk(self, &mut fword, word_len, &mut scored, SCORE_MAXINIT);
+        suggest::suggest_trie_walk(self, &mut fword, word_len as u8, &mut scored, SCORE_MAXINIT);
 
         // Rescore using sound similarity if SAL data is available.
         if self.sal.is_some() {
