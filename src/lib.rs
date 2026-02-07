@@ -1,5 +1,61 @@
 #![forbid(unsafe_code)]
-//! # vim-spell: High performance spell-check with vim's spl dictionary support.
+//! Fast spell checking using Vim's `.spl` dictionary files.
+//!
+//! Load a Vim spell dictionary and check words, get suggestions, or scan entire documents
+//! for typos. Works with any language that has a `.spl` file (English, German, Spanish, etc.).
+//!
+//! Supports the good stuff: compound words, regional variants (US/UK English), phonetic
+//! similarity, and runtime user dictionaries.
+//!
+//! # Quick Start
+//!
+//! ```no_run
+//! use vimspell::Dictionary;
+//!
+//! let bytes = std::fs::read("en.utf-8.spl").unwrap();
+//! let dict = Dictionary::parse(&bytes).unwrap();
+//!
+//! // Check a word
+//! if dict.check_word(b"hello") {
+//!     println!("Correct!");
+//! }
+//!
+//! // Get suggestions
+//! let suggestions = dict.suggestions(b"speling");
+//! println!("Did you mean: {:?}", suggestions);
+//!
+//! // Find typos in text
+//! let text = b"This is a sampel text with mistakse.";
+//! for range in dict.spell_check(text) {
+//!     println!("Typo: {}", String::from_utf8_lossy(&text[range]));
+//! }
+//! ```
+//!
+//! # Getting Dictionary Files
+//!
+//! Grab pre-built `.spl` files from [Vim's FTP site](ftp://ftp.vim.org/pub/vim/runtime/spell/)
+//! or make your own with Vim's `:mkspell` command.
+//!
+//! # Examples
+//!
+//! Add your own words at runtime:
+//!
+//! ```no_run
+//! # use vimspell::Dictionary;
+//! # let bytes = std::fs::read("en.utf-8.spl").unwrap();
+//! # let mut dict = Dictionary::parse(&bytes).unwrap();
+//! dict.add_good_word(b"rustdoc");
+//! dict.ban_word(b"irregardless");
+//! ```
+//!
+//! Set regional preferences:
+//!
+//! ```no_run
+//! # use vimspell::Dictionary;
+//! # let bytes = std::fs::read("en.utf-8.spl").unwrap();
+//! # let mut dict = Dictionary::parse(&bytes).unwrap();
+//! dict.set_region(b"us");  // Prefer US English
+//! ```
 
 use std::hash::BuildHasher;
 
@@ -108,21 +164,61 @@ const BY_FLAGS: u8 = 2;
 const BY_FLAGS2: u8 = 3;
 const BY_SPECIAL: u8 = BY_FLAGS2;
 
-/// Error type for spell file parsing.
+/// Errors that can occur when parsing a spell dictionary file.
+///
+/// These errors indicate problems with the `.spl` file format, such as corruption,
+/// unsupported versions, or malformed data structures.
+///
+/// # Examples
+///
+/// ```
+/// use vimspell::{Dictionary, ParseError};
+///
+/// let invalid_data = b"not a spell file";
+/// let result = Dictionary::parse(invalid_data);
+/// assert!(result.is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
+    /// The file ended unexpectedly while reading required data.
+    ///
+    /// This usually indicates a truncated or corrupted file.
     UnexpectedEof,
+
+    /// The file does not start with the VIMspell magic header.
+    ///
+    /// Valid spell files must begin with the 8-byte sequence `b"VIMspell"`.
     InvalidMagic,
+
+    /// The spell file format version is not supported.
+    ///
+    /// This library only supports VIMspell format version 50.
     UnsupportedVersion,
+
+    /// A word tree node has an invalid sibling count.
+    ///
+    /// This indicates corruption in the trie data structure.
     InvalidSiblingCount,
+
+    /// A tree index value exceeds the bounds of the tree data.
+    ///
+    /// This indicates corruption in the trie index array.
     TreeIndexOverflow,
+
+    /// A shared subtree reference points to an invalid index.
+    ///
+    /// This indicates corruption in the trie's shared node references.
     InvalidSharedIndex,
+
+    /// The file contains a required section that is not recognized.
+    ///
+    /// This may indicate a newer file format version or corruption.
     UnknownRequiredSection,
 }
 
-pub(crate) struct WordTree {
-    pub(crate) byts: Vec<u8>,
-    pub(crate) idxs: Vec<u32>,
+struct WordTree {
+    byts: Vec<u8>,
+    idxs: Vec<u32>,
 }
 
 struct SyllableItem {
@@ -349,7 +445,7 @@ impl WordTree {
     }
 }
 
-pub(crate) struct CharFlags {
+struct CharFlags {
     flags: [u8; 256],
     foldchars: [u8; 256],
 }
@@ -374,7 +470,7 @@ impl CharFlags {
         Self { flags, foldchars }
     }
 
-    pub(crate) fn is_word_char(&self, b: u8) -> bool {
+    fn is_word_char(&self, b: u8) -> bool {
         self.flags[b as usize] & CF_WORD != 0
     }
 
@@ -386,7 +482,7 @@ impl CharFlags {
         self.flags[b as usize] & CF_UPPER != 0
     }
 
-    pub(crate) fn fold(&self, b: u8) -> u8 {
+    fn fold(&self, b: u8) -> u8 {
         self.foldchars[b as usize]
     }
 
@@ -421,10 +517,10 @@ impl std::ops::Index<Bytes> for Arena {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Bytes {
-    pub(crate) start: u32,
-    pub(crate) len: u32,
+#[derive(Clone, Copy, Default, Debug)]
+struct Bytes {
+    start: u32,
+    len: u32,
 }
 
 impl Bytes {
@@ -452,7 +548,7 @@ struct CommonWordEntry {
     count: u16,
 }
 
-pub(crate) struct CommonWords {
+struct CommonWords {
     entries: Vec<CommonWordEntry>,
     mask: u32,
 }
@@ -480,7 +576,7 @@ impl CommonWords {
         }
     }
 
-    pub(crate) fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
+    fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
         if self.entries.is_empty() {
             return 0;
         }
@@ -567,13 +663,13 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
     true
 }
 
-pub(crate) struct MapInfo {
-    pub(crate) map_array: [u32; 256],
+struct MapInfo {
+    map_array: [u32; 256],
 }
 
-pub(crate) struct RepItem {
-    pub(crate) from: Bytes,
-    pub(crate) to: Bytes,
+struct RepItem {
+    from: Bytes,
+    to: Bytes,
 }
 
 struct SalItem {
@@ -591,19 +687,41 @@ struct SalInfo {
     rem_accents: bool,
 }
 
-/// A loaded spell dictionary.
+/// A loaded spell dictionary with word validation and suggestion capabilities.
+///
+/// This is the main entry point for spell checking operations. It contains the parsed
+/// dictionary data including word trees, character flags, compound rules, phonetic tables,
+/// and user-defined word lists.
+///
+/// # Examples
+///
+/// ```no_run
+/// use vimspell::Dictionary;
+/// use std::fs;
+///
+/// let bytes = fs::read("en.utf-8.spl").unwrap();
+/// let dict = Dictionary::parse(&bytes).unwrap();
+///
+/// // Check words
+/// assert!(dict.check_word(b"correct"));
+/// assert!(!dict.check_word(b"wrng"));
+///
+/// // Get suggestions
+/// let suggestions = dict.suggestions(b"speling");
+/// assert!(suggestions.contains(&b"spelling".to_vec()));
+/// ```
 pub struct Dictionary {
-    pub(crate) arena: Arena,
+    arena: Arena,
     hasher: hashbrown::DefaultHashBuilder,
     user_good_words: HashTable<Bytes>,
     user_banned_words: HashTable<Bytes>,
 
-    pub(crate) foldtree: WordTree,
+    foldtree: WordTree,
     keeptree: WordTree,
     prefixtree: WordTree,
-    pub(crate) charflags: CharFlags,
+    charflags: CharFlags,
     regions: Vec<[u8; 2]>,
-    pub(crate) region: u8,
+    region: u8,
     prefcond: Vec<Bytes>,
     comp_max: u8,
     comp_minlen: u8,
@@ -616,12 +734,12 @@ pub struct Dictionary {
     #[allow(dead_code)]
     nobreak: bool,
     sal: Option<SalInfo>,
-    pub(crate) map: Option<MapInfo>,
-    pub(crate) rep: Vec<RepItem>,
-    pub(crate) rep_first: [i16; 256],
-    pub(crate) repsal: Vec<RepItem>,
-    pub(crate) repsal_first: [i16; 256],
-    pub(crate) common_words: CommonWords,
+    map: Option<MapInfo>,
+    rep: Vec<RepItem>,
+    rep_first: [i16; 256],
+    repsal: Vec<RepItem>,
+    repsal_first: [i16; 256],
+    common_words: CommonWords,
 }
 
 #[derive(Debug, PartialEq)]
@@ -678,13 +796,38 @@ fn captype(word: &[u8], charflags: &CharFlags) -> u8 {
 }
 
 impl Dictionary {
+    /// Parses a Vim spell dictionary file from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if the file is corrupted, truncated, or uses an
+    /// unsupported format version.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use vimspell::Dictionary;
+    ///
+    /// let bytes = std::fs::read("en.utf-8.spl").unwrap();
+    /// let dict = Dictionary::parse(&bytes).unwrap();
+    /// ```
     pub fn parse(content: &[u8]) -> Result<Self, ParseError> {
         parser::parse(content)
     }
-    /// Check text for spelling errors, returning an iterator of byte ranges.
+    /// Checks text for spelling errors, returning an iterator of byte ranges.
     ///
-    /// Each range represents the byte offsets (start..end) of a misspelled word
-    /// in the input text.
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use vimspell::Dictionary;
+    /// # let bytes = std::fs::read("en.utf-8.spl").unwrap();
+    /// # let dict = Dictionary::parse(&bytes).unwrap();
+    /// let text = b"This is a tset with mistaks.";
+    /// for range in dict.spell_check(text) {
+    ///     let word = &text[range.clone()];
+    ///     println!("Misspelled: {}", String::from_utf8_lossy(word));
+    /// }
+    /// ```
     pub fn spell_check<'a>(
         &'a self,
         input: &'a [u8],
@@ -692,23 +835,14 @@ impl Dictionary {
         SpellCheckIter::new(self, input)
     }
 
-    /// Returns the region names defined in this dictionary.
-    ///
-    /// Each region is a 2-byte code (e.g., `b"us"`, `b"ca"`, `b"au"`).
-    /// The index of each region corresponds to its bit position in the
-    /// region bitmask used by `set_region`.
+    /// Returns the region names defined in this dictionary (e.g., `b"us"`, `b"gb"`, `b"ca"`).
     pub fn region_names(&self) -> &[[u8; 2]] {
         &self.regions
     }
 
-    /// Set the active region for spell checking.
+    /// Sets the active region for spell checking.
     ///
-    /// Words marked as region-specific will only be accepted if they
-    /// match this region. Pass a 2-byte region code (e.g., `b"us"`).
-    /// If the region is not found in the dictionary, the region is set
-    /// to (accept all regions).
-    ///
-    /// Returns false, if region was unknown
+    /// Returns `false` if the region is not found (all regions will be accepted).
     pub fn set_region(&mut self, region: &[u8; 2]) -> bool {
         for (i, name) in self.regions.iter().enumerate() {
             if name == region {
@@ -720,16 +854,14 @@ impl Dictionary {
         return false;
     }
 
-    /// Clear the active region, accepting words from all regions.
+    /// Clears the active region filter, accepting words from all regions.
     pub fn clear_region(&mut self) {
         self.region = REGION_ALL;
     }
 
     /// Adds a word to the user dictionary as correct.
     ///
-    /// The word will be accepted during spell checking even if it's not in
-    /// the main dictionary. If the word was previously marked as banned, it
-    /// will be removed from the banned list.
+    /// The word will be accepted during spell checking even if not in the main dictionary.
     pub fn add_good_word(&mut self, word: &[u8]) {
         let _ = self
             .user_banned_words
@@ -749,9 +881,7 @@ impl Dictionary {
 
     /// Marks a word as banned (incorrect).
     ///
-    /// The word will be flagged as a spelling error even if it exists in the
-    /// main dictionary. If the word was previously marked as good, it will be
-    /// removed from the good list.
+    /// The word will be flagged as a spelling error even if it exists in the main dictionary.
     pub fn ban_word(&mut self, word: &[u8]) {
         let _ = self
             .user_good_words
@@ -769,10 +899,7 @@ impl Dictionary {
         }
     }
 
-    /// Removes a word from the user dictionary.
-    ///
-    /// Removes the word from both the good and banned lists, returning spell
-    /// checking to the main dictionary's behavior.
+    /// Removes a word from the user dictionary (both good and banned lists).
     pub fn remove_user_word(&mut self, word: &[u8]) {
         let _ = self
             .user_good_words
@@ -789,6 +916,7 @@ impl Dictionary {
             .map(|entry| entry.remove());
     }
 
+    /// Returns `true` if the dictionary has SAL (Sound Alike) phonetic data for suggestions.
     pub fn has_sal(&self) -> bool {
         self.sal.is_some()
     }
@@ -803,7 +931,7 @@ impl Dictionary {
         !self.common_words.is_empty()
     }
 
-    pub(crate) fn score_wordcount_adj(&self, score: i32, word: &[u8], split: bool) -> i32 {
+    fn score_wordcount_adj(&self, score: i32, word: &[u8], split: bool) -> i32 {
         let count = self.common_words.lookup(&self.arena, word);
         if count == 0 {
             return score;
@@ -1036,7 +1164,9 @@ impl Dictionary {
         }
     }
 
-    /// Get spelling suggestions for a misspelled word.
+    /// Gets spelling suggestions for a misspelled word.
+    ///
+    /// Returns up to 25 suggestions ranked by similarity (edit distance, phonetic similarity, etc.).
     pub fn suggestions(&self, word: &[u8]) -> Vec<Vec<u8>> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
@@ -1069,9 +1199,9 @@ impl Dictionary {
         results.into_iter().map(|(w, _)| w).collect()
     }
 
-    /// Get spelling suggestions with their scores for a misspelled word.
+    /// Gets spelling suggestions with their scores for a misspelled word.
     ///
-    /// Returns `(word, score)` pairs sorted by score (lowest = best).
+    /// Returns up to 25 `(word, score)` pairs sorted by score (lower is better).
     pub fn suggestions_scored(&self, word: &[u8]) -> Vec<(Vec<u8>, i32)> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
@@ -1220,7 +1350,7 @@ impl Dictionary {
         results
     }
 
-    /// Check if a single word is spelled correctly.
+    /// Checks if a single word is spelled correctly.
     pub fn check_word(&self, word: &[u8]) -> bool {
         matches!(
             self.check_word_internal(word),
@@ -1750,12 +1880,12 @@ impl Dictionary {
         WordResult::NotFound
     }
 
-    /// Returns true if compound word support is enabled for this dictionary.
+    /// Returns `true` if compound word support is enabled for this dictionary.
     pub fn has_compound_rules(&self) -> bool {
         !self.comp_rules.is_empty()
     }
 
-    /// Iterates over words with compound flags and calls the callback with (word, flags).
+    /// Iterates over words with compound flags, calling the callback with `(word, flags)`.
     pub fn iter_compound_words<F>(&self, mut callback: F)
     where
         F: FnMut(&[u8], u32),
@@ -1820,18 +1950,6 @@ impl Dictionary {
             }
         }
     }
-}
-
-/// Information about compound word configuration.
-#[derive(Debug)]
-pub struct CompoundInfo {
-    pub max_words: u8,
-    pub min_part_len: u8,
-    pub max_syllables: u8,
-    pub rules_count: usize,
-    pub patterns_count: usize,
-    pub start_flags: Vec<u8>,
-    pub all_flags: Vec<u8>,
 }
 
 struct SpellCheckIter<'a> {

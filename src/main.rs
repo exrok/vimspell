@@ -1,4 +1,4 @@
-use vim_spell::Dictionary;
+use vimspell::Dictionary;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

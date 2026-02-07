@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vim-spell"
+name = "vimspell"
 version = "0.1.0"
 dependencies = [
  "hashbrown",
