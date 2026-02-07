@@ -1,10 +1,9 @@
-mod trace;
-pub use trace::Trace;
-pub(crate) use trace::{enable_trace, take_trace};
+// mod trace;
+// pub use trace::Trace;
+// pub(crate) use trace::{enable_trace, take_trace};
 
 use super::*;
 use hashbrown::HashMap;
-use jsony::Jsony;
 
 macro_rules! trace {
     ($($tt:tt)*) => {};
@@ -15,8 +14,8 @@ macro_rules! trace {
 //     (init $depth:expr, $query:expr, $prefix:expr, $score:expr) => {
 //         trace::with_trace(|t| t.init($depth, $query, $prefix, $score))
 //     };
-//     (go_deeper $depth:expr, $query:expr, $child_score:expr) => {
-//         trace::with_trace(|t| t.go_deeper($depth, $query, $child_score))
+//     (go_deeper $depth:expr, $query:expr, $trace: expr, $child_score:expr) => {
+//         trace::with_trace(|t| t.go_deeper($depth, $query, $trace, $child_score))
 //     };
 //     (enter_state $depth:expr, $state:expr) => {
 //         trace::with_trace(|t| t.enter_state($depth, $state))
@@ -26,9 +25,8 @@ macro_rules! trace {
 //     };
 // }
 
-#[derive(Clone, Copy, PartialEq, Eq, Jsony)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-#[jsony(Binary)]
 pub enum State {
     Start,
     Plain,
@@ -393,14 +391,12 @@ pub(crate) fn suggest_trie_walk(
 
     macro_rules! recurse {
         ($score_add: expr) => {{
-            trace::with_trace(|t| {
-                t.go_deeper(
-                    depth,
-                    &query.bytes[0..query_len as usize],
-                    &prefix[0..current.prefix_len as usize],
-                    current.score,
-                )
-            });
+            trace!( go_deeper
+                depth,
+                &query.bytes[0..query_len as usize],
+                &prefix[0..current.prefix_len as usize],
+                current.score
+            );
             let parent = *current;
             depth += 1;
             current = &mut stack[depth as usize];

@@ -1,22 +1,16 @@
 use std::cell::RefCell;
 use std::fmt;
 
-use jsony::Jsony;
-
 use crate::MAXWLEN_EXT;
 
 use super::State;
 
-#[derive(Jsony)]
-#[jsony(Binary)]
 pub enum Action {
     EnterState(State),
     GoDeeper { child: u32 },
     Suggest { word: Vec<u8>, score: i32 },
 }
 
-#[derive(Jsony)]
-#[jsony(Binary)]
 pub struct TryStateTrace {
     pub id: u32,
     pub query: [u8; 24],
@@ -124,10 +118,6 @@ impl Trace {
             word: word.to_vec(),
             score,
         });
-    }
-
-    pub fn save(&self, path: &str) -> std::io::Result<()> {
-        std::fs::write(path, jsony::to_binary(&self.nodes))
     }
 }
 

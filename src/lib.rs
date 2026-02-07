@@ -62,7 +62,6 @@ use std::hash::BuildHasher;
 use hashbrown::{HashMap, HashTable, hash_table::Entry};
 
 use crate::suggest::Query;
-pub use crate::suggest::Trace;
 #[cfg(test)]
 mod nvim_compare_test;
 mod parser;
@@ -1198,16 +1197,6 @@ impl Dictionary {
     /// Returns up to 25 `(word, score)` pairs sorted by score (lower is better).
     pub fn suggestions_scored(&self, word: &[u8]) -> Vec<(Vec<u8>, i32)> {
         self.suggestions_scored_n(word, 25)
-    }
-
-    /// Gets spelling suggestions along with a detailed trace of the trie walk.
-    ///
-    /// Traces the full IDDFS path so the trace reflects actual search behavior.
-    pub fn suggestions_traced(&self, word: &[u8]) -> (Vec<Vec<u8>>, suggest::Trace) {
-        suggest::enable_trace();
-        let suggestions = self.suggestions(word);
-        let trace = suggest::take_trace().unwrap();
-        (suggestions, trace)
     }
 
     /// Rescore suggestions using SAL sound similarity and sort by
