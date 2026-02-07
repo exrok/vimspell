@@ -61,7 +61,7 @@ use std::hash::BuildHasher;
 
 use hashbrown::{HashMap, HashTable, hash_table::Entry};
 
-use crate::suggest::FWord;
+use crate::suggest::Query;
 pub use crate::suggest::Trace;
 #[cfg(test)]
 mod nvim_compare_test;
@@ -218,8 +218,8 @@ pub enum ParseError {
 }
 
 struct WordTree {
-    byts: Vec<u8>,
-    idxs: Vec<u32>,
+    node: Vec<u8>,
+    meta: Vec<u32>,
 }
 
 struct SyllableItem {
@@ -436,13 +436,13 @@ impl Syllable {
 impl WordTree {
     fn new() -> Self {
         Self {
-            byts: Vec::new(),
-            idxs: Vec::new(),
+            node: Vec::new(),
+            meta: Vec::new(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.byts.is_empty()
+        self.node.is_empty()
     }
 }
 
@@ -1142,7 +1142,9 @@ impl Dictionary {
         let mut scored = HashMap::new();
         let word_len = word.len();
 
-        let mut fword = FWord([0u8; MAXWLEN_EXT]);
+        let mut fword = Query {
+            bytes: [0u8; MAXWLEN_EXT],
+        };
         for (i, &b) in word.iter().enumerate() {
             fword[i as u8] = self.charflags.fold(b);
         }
@@ -1270,7 +1272,9 @@ impl Dictionary {
         let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
         let word_len = word.len();
 
-        let mut fword = FWord([0u8; MAXWLEN_EXT]);
+        let mut fword = Query {
+            bytes: [0u8; MAXWLEN_EXT],
+        };
         for (i, &b) in word.iter().enumerate() {
             fword[i as u8] = self.charflags.fold(b);
         }
@@ -1612,8 +1616,8 @@ impl Dictionary {
             return 0;
         }
 
-        let byts = &tree.byts;
-        let idxs = &tree.idxs;
+        let byts = &tree.node;
+        let idxs = &tree.meta;
 
         let mut result_count = 0usize;
         let mut arridx = 0usize;
@@ -1702,8 +1706,8 @@ impl Dictionary {
             return WordResult::NotFound;
         }
 
-        let byts = &self.prefixtree.byts;
-        let idxs = &self.prefixtree.idxs;
+        let byts = &self.prefixtree.node;
+        let idxs = &self.prefixtree.meta;
 
         let mut arridx = 0usize;
         let mut wlen = 0usize;
@@ -1819,7 +1823,7 @@ impl Dictionary {
             };
 
             for pi in 0..pref_count {
-                let pidx = self.prefixtree.idxs[pref_arridx + pi];
+                let pidx = self.prefixtree.meta[pref_arridx + pi];
                 let prefix_affix_id = (pidx & 0xFF) as u8;
 
                 if word_affix_id != prefix_affix_id {
@@ -1893,8 +1897,8 @@ impl Dictionary {
     ) where
         F: FnMut(&[u8], u32),
     {
-        let byts = &tree.byts;
-        let idxs = &tree.idxs;
+        let byts = &tree.node;
+        let idxs = &tree.meta;
 
         let Some(&sibling_count) = byts.get(arridx) else {
             return;

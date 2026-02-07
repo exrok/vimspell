@@ -250,8 +250,8 @@ fn build_prefix_dict() -> Dictionary {
     // [10] = 1 (1 sibling: end-of-word marker)
     // [11] = 0 (end marker), idxs[11] = word_flags
     let foldtree = WordTree {
-        byts: vec![1, b'h', 1, b'a', 1, b'p', 1, b'p', 1, b'y', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, word_flags],
+        node: vec![1, b'h', 1, b'a', 1, b'p', 1, b'p', 1, b'y', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, word_flags],
     };
 
     // Build prefix tree containing "un" with affix_id=5, condnr=0, pflags=0
@@ -265,8 +265,8 @@ fn build_prefix_dict() -> Dictionary {
     // [5] = 0 (end marker), idxs[5] = 5 (affix_id=5, condnr=0, pflags=0)
     let prefix_pidx: u32 = 5; // affix_id=5
     let prefixtree = WordTree {
-        byts: vec![1, b'u', 1, b'n', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
+        node: vec![1, b'u', 1, b'n', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, prefix_pidx],
     };
 
     // Empty condition (index 0) - always matches
@@ -374,8 +374,8 @@ fn test_prefix_synthetic_with_condition() {
 
     let word_flags: u32 = (WF_AFX as u32) | (7u32 << 24);
     let foldtree = WordTree {
-        byts: vec![2, b'a', b'o', 1, b'k', 1, 0, 1, b'k', 1, 0],
-        idxs: vec![0, 3, 7, 0, 5, 0, word_flags, 0, 9, 0, word_flags],
+        node: vec![2, b'a', b'o', 1, b'k', 1, 0, 1, b'k', 1, 0],
+        meta: vec![0, 3, 7, 0, 5, 0, word_flags, 0, 9, 0, word_flags],
     };
 
     // Condition "[ao]" means the word after prefix must start with 'a' or 'o'.
@@ -385,8 +385,8 @@ fn test_prefix_synthetic_with_condition() {
     // Prefix "un" with affix_id=7, condnr=0 (index into prefcond)
     let prefix_pidx: u32 = (0u32 << 8) | 7;
     let prefixtree = WordTree {
-        byts: vec![1, b'u', 1, b'n', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, prefix_pidx],
+        node: vec![1, b'u', 1, b'n', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, prefix_pidx],
     };
 
     let dict = Dictionary {
@@ -434,15 +434,15 @@ fn test_prefix_synthetic_rare_prefix() {
 
     let word_flags: u32 = (WF_AFX as u32) | (3u32 << 24);
     let foldtree = WordTree {
-        byts: vec![1, b'g', 1, b'o', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, word_flags],
+        node: vec![1, b'g', 1, b'o', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, word_flags],
     };
 
     // Prefix with WFP_RARE flag set
     let prefix_pidx: u32 = (WFP_RARE << 24) | 3;
     let prefixtree = WordTree {
-        byts: vec![1, b'a', 1, 0],
-        idxs: vec![0, 2, 0, prefix_pidx],
+        node: vec![1, b'a', 1, 0],
+        meta: vec![0, 2, 0, prefix_pidx],
     };
 
     let dict = Dictionary {
@@ -618,8 +618,8 @@ fn test_rep_suggestions() {
 
     // Build foldtree containing "phone"
     let foldtree = WordTree {
-        byts: vec![1, b'p', 1, b'h', 1, b'o', 1, b'n', 1, b'e', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 0],
+        node: vec![1, b'p', 1, b'h', 1, b'o', 1, b'n', 1, b'e', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 0],
     };
 
     let rep_from = arena.alloc(b"f");
@@ -682,10 +682,10 @@ fn test_rep_score_is_low() {
     // "phase": p-h-a-s-e
     // "phast": p-h-a-s-t
     let foldtree = WordTree {
-        byts: vec![
+        node: vec![
             1, b'p', 1, b'h', 1, b'a', 1, b's', 2, b'e', b't', 1, 0, 1, 0,
         ],
-        idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 11, 13, 0, 0, 0, 0],
+        meta: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 11, 13, 0, 0, 0, 0],
     };
 
     let rep_from = arena.alloc(b"f");
@@ -776,10 +776,10 @@ fn test_region_filtering_synthetic() {
     // [9]  = 'r', idx=11 → [11]=1, [12]=0 (end, color_flags)
     // [10] = 'u', idx=13 → [13]=1, 'r', idx=15 → [15]=1, [16]=0 (end, colour_flags)
     let foldtree = WordTree {
-        byts: vec![
+        node: vec![
             1, b'c', 1, b'o', 1, b'l', 1, b'o', 2, b'r', b'u', 1, 0, 1, b'r', 1, 0,
         ],
-        idxs: vec![
+        meta: vec![
             0,
             2,
             0,
@@ -857,8 +857,8 @@ fn test_region_wrong_region_result() {
     // "grey" with WF_REGION, region mask = 0x02 (only region 1)
     let grey_flags: u32 = (WF_REGION as u32) | (0x02u32 << 16);
     let foldtree = WordTree {
-        byts: vec![1, b'g', 1, b'r', 1, b'e', 1, b'y', 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, grey_flags],
+        node: vec![1, b'g', 1, b'r', 1, b'e', 1, b'y', 1, 0],
+        meta: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, grey_flags],
     };
 
     let mut dict = Dictionary {
@@ -928,10 +928,10 @@ fn test_region_suggestions_penalty() {
     // Trie for "gray" and "grey":
     // root → g → r → (a → y → [end:gray], e → y → [end:grey])
     let foldtree = WordTree {
-        byts: vec![
+        node: vec![
             1, b'g', 1, b'r', 2, b'a', b'e', 1, b'y', 1, 0, 1, b'y', 1, 0,
         ],
-        idxs: vec![
+        meta: vec![
             0, 2, 0, 4, 0, 7, 11, 0, 9, 0, gray_flags, 0, 13, 0, grey_flags,
         ],
     };
@@ -1066,8 +1066,8 @@ fn test_map_similar_substitution_score() {
     //   'r' -> [7]=1 end(0) -> no flags
     //   't' -> [9]=1 end(0) -> no flags
     let foldtree = WordTree {
-        byts: vec![1, b'c', 1, b'a', 2, b'r', b't', 1, 0, 1, 0],
-        idxs: vec![0, 2, 0, 4, 0, 7, 9, 0, 0, 0, 0],
+        node: vec![1, b'c', 1, b'a', 2, b'r', b't', 1, 0, 1, 0],
+        meta: vec![0, 2, 0, 4, 0, 7, 9, 0, 0, 0, 0],
     };
 
     let mut map_array = [0u32; 256];
@@ -1166,8 +1166,8 @@ fn test_common_words_suggestion_boost() {
     // For typo "bxt", both require one substitution (SCORE_SUBST=93).
     // "bat" should rank higher due to common word bonus.
     let foldtree = WordTree {
-        byts: vec![1, b'b', 2, b'a', b'e', 1, b't', 1, 0, 1, b't', 1, 0],
-        idxs: vec![0, 2, 0, 5, 9, 0, 7, 0, 0, 0, 11, 0, 0],
+        node: vec![1, b'b', 2, b'a', b'e', 1, b't', 1, 0, 1, b't', 1, 0],
+        meta: vec![0, 2, 0, 5, 9, 0, 7, 0, 0, 0, 11, 0, 0],
     };
 
     let bat = arena.alloc(b"bat");

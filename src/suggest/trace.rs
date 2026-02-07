@@ -17,7 +17,7 @@ pub enum Action {
 
 #[derive(Jsony)]
 #[jsony(Binary)]
-pub struct NodeTrace {
+pub struct TryStateTrace {
     pub id: u32,
     pub initial_fword_prefix: [u8; 24],
     pub depth: u8,
@@ -26,12 +26,12 @@ pub struct NodeTrace {
 }
 
 pub struct Trace {
-    pub nodes: Vec<NodeTrace>,
+    pub nodes: Vec<TryStateTrace>,
     pub current: [u32; MAXWLEN_EXT],
 }
 
 impl std::ops::Index<u8> for Trace {
-    type Output = NodeTrace;
+    type Output = TryStateTrace;
 
     fn index(&self, index: u8) -> &Self::Output {
         let id = self.current[index as usize];
@@ -78,7 +78,7 @@ impl Trace {
 
     pub fn init(&mut self, depth: u8, fword: &[u8], score: i32) {
         let id = self.nodes.len() as u32;
-        self.nodes.push(NodeTrace {
+        self.nodes.push(TryStateTrace {
             id,
             initial_fword_prefix: fword_prefix(fword),
             depth,
@@ -97,7 +97,7 @@ impl Trace {
             .push(Action::GoDeeper { child: child_id });
 
         let child_depth = parent_depth + 1;
-        self.nodes.push(NodeTrace {
+        self.nodes.push(TryStateTrace {
             id: child_id,
             initial_fword_prefix: fword_prefix(fword),
             depth: child_depth,
@@ -492,11 +492,7 @@ impl fmt::Display for Trace {
             let hi = lo + bucket_size - 1;
             let bar_len = (count as f64 / max_bucket as f64 * 40.0) as usize;
             let bar: String = "#".repeat(bar_len);
-            writeln!(
-                f,
-                "  {:>3}-{:<3} {:>10} {}",
-                lo, hi, count, bar
-            )?;
+            writeln!(f, "  {:>3}-{:<3} {:>10} {}", lo, hi, count, bar)?;
         }
 
         // === Suggestion discovery timing ===
@@ -507,9 +503,7 @@ impl fmt::Display for Trace {
         for node in &self.nodes {
             for action in &node.actions {
                 if let Action::Suggest { word, score } = action {
-                    first_found
-                        .entry(word.clone())
-                        .or_insert((node.id, *score));
+                    first_found.entry(word.clone()).or_insert((node.id, *score));
                 }
             }
         }
@@ -545,13 +539,20 @@ impl fmt::Display for Trace {
                 }
             }
         }
-        writeln!(f, "  {:>10} {:>10} {:>12}", "At node", "BestScore", "Margin+150")?;
+        writeln!(
+            f,
+            "  {:>10} {:>10} {:>12}",
+            "At node", "BestScore", "Margin+150"
+        )?;
         for &(id, best) in &checkpoints {
             let pct = id as f64 / total_nodes * 100.0;
             writeln!(
                 f,
                 "  {:>10} {:>10} {:>12}   ({:.1}% through)",
-                id, best, best + 150, pct
+                id,
+                best,
+                best + 150,
+                pct
             )?;
         }
 
@@ -560,7 +561,12 @@ impl fmt::Display for Trace {
         let score_buckets = [0, 50, 100, 150, 200, 250, 300, 350];
         write!(f, "  {:>5}", "Depth")?;
         for i in 0..score_buckets.len() - 1 {
-            write!(f, " {:>4}-{:<3}", score_buckets[i], score_buckets[i + 1] - 1)?;
+            write!(
+                f,
+                " {:>4}-{:<3}",
+                score_buckets[i],
+                score_buckets[i + 1] - 1
+            )?;
         }
         writeln!(f)?;
         for d in 0..=max_depth as usize {

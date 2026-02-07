@@ -5,21 +5,24 @@ pub(crate) use trace::{enable_trace, take_trace};
 use super::*;
 use hashbrown::HashMap;
 use jsony::Jsony;
-
 macro_rules! trace {
-    (init $depth:expr, $fword:expr, $score:expr) => {
-        trace::with_trace(|t| t.init($depth, $fword, $score))
-    };
-    (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
-        trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
-    };
-    (enter_state $depth:expr, $state:expr) => {
-        trace::with_trace(|t| t.enter_state($depth, $state))
-    };
-    (suggest $depth:expr, $word:expr, $score:expr) => {
-        trace::with_trace(|t| t.suggest($depth, $word, $score))
-    };
+    ($($tt:tt)*) => {};
 }
+
+// macro_rules! trace {
+//     (init $depth:expr, $fword:expr, $score:expr) => {
+//         trace::with_trace(|t| t.init($depth, $fword, $score))
+//     };
+//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
+//         trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
+//     };
+//     (enter_state $depth:expr, $state:expr) => {
+//         trace::with_trace(|t| t.enter_state($depth, $state))
+//     };
+//     (suggest $depth:expr, $word:expr, $score:expr) => {
+//         trace::with_trace(|t| t.suggest($depth, $word, $score))
+//     };
+// }
 
 #[derive(Clone, Copy, PartialEq, Eq, Jsony)]
 #[repr(u8)]
@@ -47,19 +50,27 @@ pub enum State {
 const TSF_DIDDEL: u8 = 4;
 
 #[derive(Clone, Copy)]
+#[repr(C, align(8))]
 struct TryState {
-    state: State,
+    trie_node: u32,
     score: i32,
-    arridx: u32,
-    curi: i16,
-    fidx: u8,
-    fidxtry: u8,
-    tword_len: u8,
+    /// Current accumulated edit-distance score to reach node.
+    /// Points to current trie node's length byte
+    state: State,
     flags: u8,
-    delidx: u8,
-    split_tword_off: u8,
-    split_fidx: u8,
-    split_word_flags: u32,
+    cursor: i16,
+    /// How far have we consumed in the fword to get to this position.
+    query_pos: u8,
+    /// Don't modify characters before this postion
+    query_min_pos: u8,
+    prefix_len: u8,
+    deleted_fword_pos: u8,
+    /// In the trie-walking states (Start, Plain, InsPrep, Ins) cursor is a child index within a trie node (always >= 1).
+    /// But in Rep/Repsal states it's repurposed to hold an index into the rep/repsal arrays,
+    /// Tracks last deletion to avoid reinserting at that position
+    split_first_word_flags: u32,
+    split_prefix_pos: u8,
+    split_query_pos: u8,
 }
 
 impl Default for TryState {
@@ -67,38 +78,21 @@ impl Default for TryState {
         Self {
             state: State::Start,
             score: 0,
-            arridx: 0,
-            curi: 1,
-            fidx: 0,
-            fidxtry: 0,
-            tword_len: 0,
+            trie_node: 0,
+            cursor: 1,
+            query_pos: 0,
+            query_min_pos: 0,
+            prefix_len: 0,
             flags: 0,
-            delidx: 0,
-            split_tword_off: 0,
-            split_fidx: 0,
-            split_word_flags: 0,
+            deleted_fword_pos: 0,
+            split_prefix_pos: 0,
+            split_query_pos: 0,
+            split_first_word_flags: 0,
         }
     }
 }
 
-/// SAFETY: depth must be < MAXWLEN - 1 (checked by can_go_deeper before every call).
-#[inline(always)]
-fn go_deeper(stack: &mut [TryState; MAXWLEN_EXT], depth: u8, score_add: i32) {
-    debug_assert!(depth as usize + 1 < MAXWLEN_EXT as usize);
-    let parent = stack[depth as usize];
-    let child = &mut stack[(depth + 1) as usize];
-    *child = parent;
-    child.state = State::Start;
-    child.score = parent.score + score_add;
-    child.curi = 1;
-    child.flags = 0;
-}
-
-#[inline(always)]
-fn can_go_deeper(stack: &mut [TryState; MAXWLEN_EXT], depth: u8, add: i32, maxscore: i32) -> bool {
-    depth < ((MAXWLEN - 1) as u8) && (stack[depth as usize]).score + add < maxscore
-}
-
+const MAX_DEPTH: u8 = 253;
 const SUG_CLEAN_COUNT: usize = 150;
 const SUG_MAX_COUNT: usize = SUG_CLEAN_COUNT + 50;
 
@@ -128,19 +122,21 @@ fn cleanup_suggestions(scored: &mut HashMap<Vec<u8>, i32>, maxscore: i32) -> i32
     scored.retain(|_, &mut score| score <= threshold);
     threshold
 }
-pub struct FWord(pub [u8; MAXWLEN_EXT]);
-impl std::ops::Index<u8> for FWord {
+pub struct Query {
+    pub bytes: [u8; MAXWLEN_EXT],
+}
+impl std::ops::Index<u8> for Query {
     type Output = u8;
     #[inline(always)]
     fn index(&self, index: u8) -> &Self::Output {
-        &self.0[index as usize]
+        &self.bytes[index as usize]
     }
 }
 
-impl std::ops::IndexMut<u8> for FWord {
+impl std::ops::IndexMut<u8> for Query {
     #[inline(always)]
     fn index_mut(&mut self, index: u8) -> &mut Self::Output {
-        &mut self.0[index as usize]
+        &mut self.bytes[index as usize]
     }
 }
 
@@ -216,8 +212,8 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let byts = &keeptree.byts;
-    let idxs = &keeptree.idxs;
+    let byts = &keeptree.node;
+    let idxs = &keeptree.meta;
     let fword_len = fword.len();
 
     let uword: Vec<u8> = fword.iter().map(|&b| b.to_ascii_uppercase()).collect();
@@ -333,80 +329,129 @@ fn build_cased_word(
     apply_case(out, word, badflags, word_flags);
 }
 
+fn rot3_left(query: &mut Query, pos: u8) {
+    let a = query[pos];
+    let b = query[pos + 1];
+    let c = query[pos + 2];
+    query[pos] = b;
+    query[pos + 1] = c;
+    query[pos + 2] = a;
+}
+
+fn rot3_right(query: &mut Query, pos: u8) {
+    let a = query[pos];
+    let b = query[pos + 1];
+    let c = query[pos + 2];
+    query[pos] = c;
+    query[pos + 1] = a;
+    query[pos + 2] = b;
+}
+
+fn swap2(query: &mut Query, pos: u8) {
+    let a = query[pos];
+    let b = query[pos + 1];
+    query[pos] = b;
+    query[pos + 1] = a;
+}
+
+fn swap3(query: &mut Query, pos: u8) {
+    let a = query[pos];
+    let b = query[pos + 2];
+    query[pos] = b;
+    query[pos + 2] = a;
+}
+
 pub(crate) fn suggest_trie_walk(
     dict: &Dictionary,
-    fword: &mut FWord,
-    fword_len: u8,
+    query: &mut Query,
+    initial_query_len: u8,
     scored: &mut HashMap<Vec<u8>, i32>,
     maxscore: i32,
     badflags: u8,
 ) {
-    if dict.foldtree.byts.is_empty() {
+    if dict.foldtree.node.is_empty() {
         return;
     }
 
-    let byts: &[u8] = &dict.foldtree.byts;
-    let idxs: &[u32] = &dict.foldtree.idxs;
+    let node: &[u8] = &dict.foldtree.node;
+    let meta: &[u32] = &dict.foldtree.meta;
 
     // Pre-extract the map_array pointer to avoid Option check per iteration.
     let map_array: Option<&[u32; 256]> = dict.map.as_ref().map(|r| &r.map_array);
 
-    let mut maxscore = maxscore;
-    let mut tword = [0u8; MAXWLEN_EXT];
+    let mut max_score = maxscore;
+    let mut prefix = [0u8; MAXWLEN_EXT];
     let mut stack = [TryState::default(); MAXWLEN_EXT];
     let mut depth: u8 = 0;
     let mut repextra: i32 = 0;
-    let mut eff_fword_len = fword_len;
+    let mut query_len = initial_query_len;
 
-    // SAFETY notes for the entire loop:
-    // - `depth` is bounded: it only increases via `go_deeper` which requires
-    //   `depth < MAXWLEN - 1` (253), so `depth` is always in 0..253 and
-    //   `depth as usize` is a valid index into stack[255] and tword[255].
-    // - `arridx` comes from idxs[] entries which are valid trie node pointers.
-    //   We validate arridx < byts_len before using it.
-    // - `arridx + curi` is always <= arridx + len_byte, which is within the
-    //   trie node's allocated range in byts/idxs.
-    // - `fidx` is bounded by depth + fword_len, always < 255.
     let mut state = State::Start;
-    trace!(init 0, &fword.0, 0);
+    trace!(init 0, &query.bytes, 0);
+    let mut current = &mut stack[0];
+
+    macro_rules! recurse {
+        ($score_add: expr) => {{
+            let parent = *current;
+            depth += 1;
+            current = &mut stack[depth as usize];
+            *current = parent;
+            current.score += $score_add;
+            current.state = State::Start;
+            current.flags = 0;
+            current.cursor = 1;
+            state = State::Start;
+        }};
+    }
     loop {
-        let d = depth as usize;
         trace!(enter_state depth, state);
         match state {
             State::Start => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len) = byts.get(arridx) else {
+                let node_head = current.trie_node as usize;
+                let Some(&len) = node.get(node_head) else {
+                    if depth == 0 {
+                        break;
+                    }
                     depth -= 1;
-                    state = stack[depth as usize].state;
+                    current = &mut stack[depth as usize];
+                    state = current.state;
                     continue;
+                    // state = State::Final;
+                    // continue;
                 };
+
                 let len = len as i16;
-                let cur = stack[d].curi;
+                let cur = current.cursor;
 
                 // perf: Might not need null check
-                if cur > len || byts[arridx + cur as usize] != 0 {
-                    if stack[d].fidx >= eff_fword_len {
-                        // Inlined Del: fidx >= eff_fword_len is always true
+                if cur > len || node[node_head + cur as usize] != 0 {
+                    if !(depth < MAX_DEPTH) {
+                        state = State::Final;
+                        continue;
+                    }
+                    if current.query_pos >= query_len {
+                        // Inlined Del: query_pos >= eff_fword_len is always true
                         // here, so the go_deeper path is unreachable.
+                        current.cursor = 1;
                         state = State::InsPrep;
-                        stack[d].curi = 1;
+                        continue;
                     } else {
                         state = State::Plain;
+                        continue;
                     }
-                    continue;
                 }
 
-                stack[d].curi += 1;
+                current.cursor += 1;
 
-                let flags = idxs[arridx + cur as usize];
+                let flags = meta[node_head + cur as usize];
 
                 if (flags as u16) & WF_NOSUGGEST != 0 {
                     continue;
                 }
 
-                let fidx = stack[d].fidx;
-                let fword_ends = fidx >= eff_fword_len;
-                let tword_len = stack[d].tword_len as usize;
+                let query_pos = current.query_pos;
+                let query_ends = query_pos >= query_len;
+                let prefix_len = current.prefix_len as usize;
 
                 let goodword_ends = (flags as u16 & WF_NEEDCOMP) == 0;
 
@@ -414,35 +459,35 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let mut newscore: i32 = 0;
+                let mut new_score: i32 = 0;
                 if (flags as u8) & WF_REGION != 0 {
                     let region_mask = ((flags >> 16) & 0xff) as u8;
                     if region_mask & dict.region == 0 {
-                        newscore += SCORE_REGION;
+                        new_score += SCORE_REGION;
                     }
                 }
                 if (flags as u8) & WF_RARE != 0 {
-                    newscore += SCORE_RARE;
+                    new_score += SCORE_RARE;
                 }
 
                 // SCORE_ICASE penalty for case mismatch
                 let rct = result_captype(badflags, flags);
                 if !spell_valid_case(badflags, rct) {
-                    newscore += SCORE_ICASE;
+                    new_score += SCORE_ICASE;
                 }
 
-                if fword_ends && goodword_ends && stack[d].fidx >= stack[d].fidxtry {
-                    let split_off = stack[d].split_tword_off as usize;
+                if query_ends && goodword_ends && current.query_pos >= current.query_min_pos {
+                    let split_off = current.split_prefix_pos as usize;
                     let is_split = split_off > 0;
 
                     // Build cased suggestion word
-                    let mut word = Vec::with_capacity(tword_len + 2);
+                    let mut word = Vec::with_capacity(prefix_len + 2);
                     if is_split {
                         build_cased_word(
                             &dict.keeptree,
-                            &tword[..split_off],
+                            &prefix[..split_off],
                             badflags,
-                            stack[d].split_word_flags,
+                            current.split_first_word_flags,
                             &mut word,
                         );
                         word.push(b' ');
@@ -450,7 +495,7 @@ pub(crate) fn suggest_trie_walk(
                     let second_start = word.len();
                     build_cased_word(
                         &dict.keeptree,
-                        &tword[if is_split { split_off } else { 0 }..tword_len],
+                        &prefix[if is_split { split_off } else { 0 }..prefix_len],
                         badflags,
                         flags,
                         &mut word,
@@ -459,83 +504,87 @@ pub(crate) fn suggest_trie_walk(
                     // Apply common word bonus (before SAL, matching Neovim)
                     let total = if !dict.common_words.is_empty() {
                         dict.score_wordcount_adj(
-                            stack[d].score + newscore,
+                            current.score + new_score,
                             &word[second_start..],
                             is_split,
                         )
                     } else {
-                        stack[d].score + newscore
+                        current.score + new_score
                     };
 
-                    if total < maxscore {
+                    if total < max_score {
                         add_suggestion(scored, &word, total);
                         trace!(suggest depth, &word, total);
 
                         if scored.len() > SUG_MAX_COUNT {
-                            maxscore = cleanup_suggestions(scored, maxscore);
+                            max_score = cleanup_suggestions(scored, max_score);
                         }
                     }
                 }
 
-                if !fword_ends
+                if !query_ends
                     && goodword_ends
-                    && stack[d].split_tword_off == 0
-                    && stack[d].fidx >= stack[d].fidxtry
+                    && current.split_prefix_pos == 0
+                    && current.query_pos >= current.query_min_pos
                 {
-                    let mut extra = newscore + SCORE_SPLIT;
+                    let mut extra = new_score + SCORE_SPLIT;
                     // Give a bonus to common first words at the split point
                     if !dict.common_words.is_empty() {
-                        extra = dict.score_wordcount_adj(extra, &tword[..tword_len], true);
+                        extra = dict.score_wordcount_adj(extra, &prefix[..prefix_len], true);
                     }
-                    if can_go_deeper(&mut stack, depth, extra, maxscore) {
-                        let prev_fidx = stack[d].fidx;
-                        stack[d].state = state;
-                        go_deeper(&mut stack, depth, extra);
-                        trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                        depth += 1;
-                        state = State::Start;
-                        let sd = depth as usize;
-                        stack[sd].arridx = 0;
-                        stack[sd].split_tword_off = tword_len as u8;
-                        stack[sd].split_fidx = prev_fidx;
-                        stack[sd].split_word_flags = flags;
+                    if current.score + extra < max_score {
+                        if !(depth < MAX_DEPTH) {
+                            state = State::Final;
+                            continue;
+                        }
+                        let prev_query_pos = current.query_pos;
+                        current.state = state;
+                        recurse!(extra);
+
+                        current.trie_node = 0;
+                        current.split_prefix_pos = prefix_len as u8;
+                        current.split_query_pos = prev_query_pos;
+                        current.split_first_word_flags = flags;
                         continue;
                     }
                 }
             }
             State::Plain => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len) = byts.get(arridx) else {
+                let node_head = current.trie_node as usize;
+                let Some(&len) = node.get(node_head) else {
+                    if depth == 0 {
+                        break;
+                    }
                     depth -= 1;
-                    state = stack[depth as usize].state;
+                    current = &mut stack[depth as usize];
+                    state = current.state;
                     continue;
                 };
                 let len = len as i16;
 
-                if stack[d].curi > len {
-                    if stack[d].fidx >= stack[d].fidxtry {
-                        // Inlined Del: fidx >= fidxtry is always true
+                if current.cursor > len {
+                    if current.query_pos >= current.query_min_pos {
+                        // Inlined Del: query_pos >= fidxtry is always true
                         // here, so only the eff_fword_len guard remains.
                         state = State::InsPrep;
-                        stack[d].curi = 1;
+                        current.cursor = 1;
 
-                        let fidx = stack[d].fidx;
-                        if fidx < eff_fword_len {
-                            let newscore = SCORE_DEL;
-                            if can_go_deeper(&mut stack, depth, newscore, maxscore) {
-                                stack[d].state = state;
-                                go_deeper(&mut stack, depth, newscore);
-                                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                                depth += 1;
-                                state = State::Start;
-                                let sd = depth as usize;
-                                stack[sd].flags |= TSF_DIDDEL;
-                                stack[sd].delidx = fidx;
-                                stack[sd].fidx += 1;
+                        let query_pos = current.query_pos;
+                        if query_pos < query_len {
+                            if current.score + SCORE_DEL < max_score {
+                                current.state = state;
 
-                                let new_fidx = stack[sd].fidx;
-                                if new_fidx < eff_fword_len && fword[new_fidx] == fword[fidx] {
-                                    stack[sd].score -= SCORE_DEL - SCORE_DELDUP;
+                                recurse!(SCORE_DEL);
+
+                                current.flags |= TSF_DIDDEL;
+                                current.deleted_fword_pos = query_pos;
+                                current.query_pos += 1;
+
+                                let new_query_pos = current.query_pos;
+                                if new_query_pos < query_len
+                                    && query[new_query_pos] == query[query_pos]
+                                {
+                                    current.score -= SCORE_DEL - SCORE_DELDUP;
                                 }
                             }
                         }
@@ -545,95 +594,93 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let idx = arridx + stack[d].curi as usize;
-                stack[d].curi += 1;
-                let c = byts[idx];
+                let idx = node_head + current.cursor as usize;
+                current.cursor += 1;
+                let c = node[idx];
 
-                let fidx = stack[d].fidx;
+                let query_pos = current.query_pos;
                 // Match C behavior: always use SCORE_SUBST for pruning.
                 // similar_chars adjustment happens post-go_deeper (below).
-                let newscore = if fidx < eff_fword_len && c == fword[fidx] {
+                let new_score = if query_pos < query_len && c == query[query_pos] {
                     0
-                } else if fidx >= eff_fword_len {
+                } else if query_pos >= query_len {
                     SCORE_INS
                 } else {
                     SCORE_SUBST
                 };
 
-                if newscore != 0
-                    && (stack[d].fidx < stack[d].fidxtry
-                        || ((stack[d].flags & TSF_DIDDEL) != 0 && c == fword[stack[d].delidx]))
+                if new_score != 0
+                    && (current.query_pos < current.query_min_pos
+                        || ((current.flags & TSF_DIDDEL) != 0
+                            && c == query[current.deleted_fword_pos]))
                 {
                     continue;
                 }
 
-                if can_go_deeper(&mut stack, depth, newscore, maxscore) {
-                    stack[d].state = state;
-                    go_deeper(&mut stack, depth, newscore);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    let sd = depth as usize;
-                    if fidx < eff_fword_len {
-                        stack[sd].fidx += 1;
+                if current.score + new_score < max_score {
+                    current.state = state;
+                    recurse!(new_score);
+                    if query_pos < query_len {
+                        current.query_pos += 1;
                     }
-                    tword[stack[sd].tword_len as usize] = c;
-                    stack[sd].tword_len += 1;
-                    stack[sd].arridx = idxs[idx];
+                    prefix[current.prefix_len as usize] = c;
+                    current.prefix_len += 1;
+                    current.trie_node = meta[idx];
 
-                    if newscore == SCORE_SUBST
-                        && fidx < eff_fword_len
-                        && similar_chars(map_array, fword[fidx], c)
+                    if new_score == SCORE_SUBST
+                        && query_pos < query_len
+                        && similar_chars(map_array, query[query_pos], c)
                     {
-                        stack[sd].score -= SCORE_SUBST - SCORE_SIMILAR;
+                        current.score -= SCORE_SUBST - SCORE_SIMILAR;
                     }
                 }
             }
 
             State::InsPrep => {
-                if stack[d].flags & TSF_DIDDEL != 0 {
+                if current.flags & TSF_DIDDEL != 0 {
                     state = State::Swap;
                     continue;
                 }
 
-                let arridx = stack[d].arridx as usize;
-                let Some(&len) = byts.get(arridx) else {
+                let arridx = current.trie_node as usize;
+                let Some(&len) = node.get(arridx) else {
                     depth -= 1;
                     state = stack[depth as usize].state;
+                    current = &mut stack[depth as usize];
                     continue;
                 };
                 let len = len as i16;
 
                 loop {
-                    if stack[d].curi > len {
+                    if current.cursor > len {
                         state = State::Swap;
                         break;
                     }
-                    if byts[arridx + stack[d].curi as usize] != 0 {
+                    if node[arridx + current.cursor as usize] != 0 {
                         state = State::Ins;
                         break;
                     }
-                    stack[d].curi += 1;
+                    current.cursor += 1;
                 }
             }
 
             State::Ins => {
-                let arridx = stack[d].arridx as usize;
-                let Some(&len) = byts.get(arridx) else {
+                let node_head = current.trie_node as usize;
+                let Some(&len) = node.get(node_head) else {
                     state = State::Swap;
                     continue;
                 };
                 let len = len as i16;
 
-                if stack[d].curi > len {
+                if current.cursor > len {
                     state = State::Swap;
                     continue;
                 }
 
-                let idx = arridx + stack[d].curi as usize;
-                stack[d].curi += 1;
+                let node_index = node_head + current.cursor as usize;
+                current.cursor += 1;
 
-                let Some(&c) = byts.get(idx) else {
+                let Some(&c) = node.get(node_index) else {
                     state = State::Swap;
                     continue;
                 };
@@ -642,274 +689,230 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                let fidx = stack[d].fidx;
-                if fidx < eff_fword_len && c == fword[fidx] {
+                let query_pos = current.query_pos;
+                if query_pos < query_len && c == query[query_pos] {
                     continue;
                 }
 
-                if can_go_deeper(&mut stack, depth, SCORE_INS, maxscore) {
-                    stack[d].state = state;
-                    go_deeper(&mut stack, depth, SCORE_INS);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    let sd = depth as usize;
-                    tword[stack[sd].tword_len as usize] = c;
-                    stack[sd].tword_len += 1;
-                    stack[sd].arridx = idxs[idx];
+                if current.score + SCORE_INS < max_score {
+                    current.state = state;
+                    recurse!(SCORE_INS);
+                    prefix[current.prefix_len as usize] = c;
+                    current.prefix_len += 1;
+                    current.trie_node = meta[node_index];
 
-                    let tw_len = stack[sd].tword_len;
-                    if tw_len >= 2 && tword[(tw_len - 2) as usize] == c {
-                        stack[sd].score -= SCORE_INS - SCORE_INSDUP;
+                    let tw_len = current.prefix_len;
+                    if tw_len >= 2 && prefix[(tw_len - 2) as usize] == c {
+                        current.score -= SCORE_INS - SCORE_INSDUP;
                     }
                 }
             }
 
             State::Swap => {
-                let fidx = stack[d].fidx;
-                if fidx + 1 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
+                let query_pos = current.query_pos;
+                if query_pos + 1 >= query_len || current.query_pos < current.query_min_pos {
                     state = State::RepIni;
                     continue;
                 }
 
-                let c1 = fword[fidx];
-                let c2 = fword[fidx + 1];
+                let c1 = query[query_pos];
+                let c2 = query[query_pos + 1];
 
                 if c1 == c2 {
                     state = State::Swap3;
                     continue;
                 }
 
-                if can_go_deeper(&mut stack, depth, SCORE_SWAP, maxscore) {
+                if current.score + SCORE_SWAP < max_score {
+                    query[query_pos] = c2;
+                    query[query_pos + 1] = c1;
+                    let prev_query_pos = current.query_pos;
                     state = State::Unswap;
-                    stack[d].state = state;
-                    fword[fidx] = c2;
-                    fword[fidx + 1] = c1;
-                    let prev_fidx = stack[d].fidx;
-                    go_deeper(&mut stack, depth, SCORE_SWAP);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    stack[depth as usize].fidxtry = prev_fidx + 2;
+                    current.state = state;
+                    recurse!(SCORE_SWAP);
+                    current.query_min_pos = prev_query_pos + 2;
                 } else {
                     state = State::RepIni;
                 }
             }
 
             State::Unswap => {
-                let fidx = stack[d].fidx;
-                let c1 = fword[fidx];
-                let c2 = fword[fidx + 1];
-                fword[fidx] = c2;
-                fword[fidx + 1] = c1;
+                swap2(query, current.query_pos);
                 state = State::Swap3;
             }
 
             State::Swap3 => {
-                let fidx = stack[d].fidx;
-                if fidx + 2 >= eff_fword_len || stack[d].fidx < stack[d].fidxtry {
+                let query_pos = current.query_pos;
+                if query_pos + 2 >= query_len || current.query_pos < current.query_min_pos {
                     state = State::RepIni;
                     continue;
                 }
 
-                let c1 = fword[fidx];
-                let c3 = fword[fidx + 2];
+                let c1 = query[query_pos];
+                let c3 = query[query_pos + 2];
 
                 if c1 == c3 {
                     state = State::RepIni;
                     continue;
                 }
 
-                if can_go_deeper(&mut stack, depth, SCORE_SWAP3, maxscore) {
+                if current.score + SCORE_SWAP3 < max_score {
+                    query[query_pos] = c3;
+                    query[query_pos + 2] = c1;
                     state = State::Unswap3;
-                    stack[d].state = state;
-                    fword[fidx] = c3;
-                    fword[fidx + 2] = c1;
-                    let prev_fidx = stack[d].fidx;
-                    go_deeper(&mut stack, depth, SCORE_SWAP3);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    stack[depth as usize].fidxtry = prev_fidx + 3;
+                    current.state = state;
+                    recurse!(SCORE_SWAP3);
+                    current.query_min_pos = query_pos + 3;
                 } else {
                     state = State::RepIni;
                 }
             }
 
             State::Unswap3 => {
-                let fidx = stack[d].fidx;
-                let c1 = fword[fidx];
-                let c3 = fword[fidx + 2];
-                fword[fidx] = c3;
-                fword[fidx + 2] = c1;
+                let query_pos = current.query_pos;
+                swap3(query, query_pos);
 
-                if fidx + 2 < eff_fword_len
-                    && can_go_deeper(&mut stack, depth, SCORE_SWAP3, maxscore)
-                {
+                if query_pos + 2 < query_len && current.score + SCORE_SWAP3 < max_score {
+                    rot3_left(query, query_pos);
+
                     state = State::UnRot3l;
-                    stack[d].state = state;
-                    let a = fword[fidx];
-                    let b = fword[fidx + 1];
-                    let c = fword[fidx + 2];
-                    fword[fidx] = b;
-                    fword[fidx + 1] = c;
-                    fword[fidx + 2] = a;
-                    let prev_fidx = stack[d].fidx;
-                    go_deeper(&mut stack, depth, SCORE_SWAP3);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    stack[depth as usize].fidxtry = prev_fidx + 3;
+                    current.state = state;
+                    recurse!(SCORE_SWAP3);
+                    current.query_min_pos = query_pos + 3;
                     continue;
                 }
                 state = State::RepIni;
             }
 
             State::UnRot3l => {
-                let fidx = stack[d].fidx;
-                let b = fword[fidx];
-                let c = fword[fidx + 1];
-                let a = fword[fidx + 2];
-                fword[fidx] = a;
-                fword[fidx + 1] = b;
-                fword[fidx + 2] = c;
-
-                if can_go_deeper(&mut stack, depth, SCORE_SWAP3, maxscore) {
+                let query_pos = current.query_pos;
+                rot3_right(query, query_pos);
+                if current.score + SCORE_SWAP3 < max_score {
+                    rot3_right(query, query_pos);
                     state = State::UnRot3r;
-                    stack[d].state = state;
-                    let a = fword[fidx];
-                    let b = fword[fidx + 1];
-                    let c = fword[fidx + 2];
-                    fword[fidx] = c;
-                    fword[fidx + 1] = a;
-                    fword[fidx + 2] = b;
-                    let prev_fidx = stack[d].fidx;
-                    go_deeper(&mut stack, depth, SCORE_SWAP3);
-                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                    depth += 1;
-                    state = State::Start;
-                    stack[depth as usize].fidxtry = prev_fidx + 3;
+                    current.state = state;
+                    recurse!(SCORE_SWAP3);
+                    current.query_min_pos = query_pos + 3;
                 } else {
                     state = State::RepIni;
                 }
             }
 
             State::UnRot3r => {
-                let fidx = stack[d].fidx;
-                let c = fword[fidx];
-                let a = fword[fidx + 1];
-                let b = fword[fidx + 2];
-                fword[fidx] = a;
-                fword[fidx + 1] = b;
-                fword[fidx + 2] = c;
-
+                rot3_left(query, current.query_pos);
                 state = State::RepIni;
             }
 
             State::RepIni => {
                 if dict.rep.is_empty()
-                    || stack[d].score + SCORE_REP >= maxscore
-                    || stack[d].fidx < stack[d].fidxtry
+                    || current.score + SCORE_REP >= max_score
+                    || current.query_pos < current.query_min_pos
                 {
                     state = State::RepsalIni;
                     continue;
                 }
 
-                let fidx = stack[d].fidx;
-                if fidx >= eff_fword_len {
+                let query_pos = current.query_pos;
+                if query_pos >= query_len {
                     state = State::RepsalIni;
                     continue;
                 }
 
-                let first = dict.rep_first[fword[fidx] as usize];
+                let first = dict.rep_first[query[query_pos] as usize];
                 if first < 0 {
                     state = State::RepsalIni;
                     continue;
                 }
 
-                stack[d].curi = first;
+                current.cursor = first;
                 state = State::Rep;
             }
 
             State::Rep => {
-                let fidx = stack[d].fidx;
-                let curi = stack[d].curi as usize;
+                let query_pos = current.query_pos;
+                let rep_cursor = current.cursor as usize;
 
-                if curi >= dict.rep.len() {
+                let Some(&RepItem { from, to }) = dict.rep.get(rep_cursor) else {
+                    state = State::RepsalIni;
+                    continue;
+                };
+
+                // let from_len = from.len();
+                // let to_len = to.len();
+                let from_bytes = &dict.arena[from];
+
+                if from_bytes[0] != query[query_pos] {
                     state = State::RepsalIni;
                     continue;
                 }
 
-                let from_len = dict.rep[curi].from.len();
-                let to_len = dict.rep[curi].to.len();
-                let first_byte = dict.arena[dict.rep[curi].from][0];
+                current.cursor += 1;
 
-                if first_byte != fword[fidx] {
-                    state = State::RepsalIni;
+                if (query_pos as usize) + from.len() > query_len as usize {
                     continue;
                 }
 
-                stack[d].curi += 1;
-
-                if (fidx as usize) + from_len > eff_fword_len as usize {
+                if query.bytes[(query_pos as usize)..(query_pos as usize) + from.len()]
+                    != *from_bytes
+                {
                     continue;
                 }
 
-                let from_bytes = &dict.arena[dict.rep[curi].from];
-                if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
+                if current.score + SCORE_REP >= max_score {
                     continue;
                 }
 
-                if !can_go_deeper(&mut stack, depth, SCORE_REP, maxscore) {
-                    continue;
-                }
-
-                let to_bytes = &dict.arena[dict.rep[curi].to];
+                let to_bytes = &dict.arena[to];
 
                 state = State::RepUndo;
-                stack[d].state = state;
+                current.state = state;
 
-                if from_len != to_len {
-                    let fidx = fidx as usize;
-                    let tail_start = fidx + from_len;
-                    let tail_end = eff_fword_len as usize;
-                    if tail_start <= tail_end && fidx + to_len + (tail_end - tail_start) < MAXWLEN {
-                        fword.0.copy_within(tail_start..tail_end, fidx + to_len);
-                        repextra += to_len as i32 - from_len as i32;
-                        eff_fword_len = (fword_len as i32 + repextra) as u8;
+                if from.len() != to.len() {
+                    let query_pos = query_pos as usize;
+                    let tail_start = query_pos + from.len();
+                    let tail_end = query_len as usize;
+                    if tail_start <= tail_end
+                        && query_pos + to.len() + (tail_end - tail_start) < MAXWLEN
+                    {
+                        query
+                            .bytes
+                            .copy_within(tail_start..tail_end, query_pos + to.len());
+                        repextra += to.len() as i32 - from.len() as i32;
+                        query_len = (initial_query_len as i32 + repextra) as u8;
                     } else {
                         continue;
                     }
                 }
-                let fidx = fidx as usize;
-                fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
+                let query_pos = query_pos as usize;
+                query.bytes[query_pos..query_pos + to.len()].copy_from_slice(to_bytes);
 
-                go_deeper(&mut stack, depth, SCORE_REP);
-                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                depth += 1;
-                state = State::Start;
-                stack[depth as usize].fidxtry = (fidx + to_len) as u8;
+                recurse!(SCORE_REP);
+
+                current.query_min_pos = (query_pos + to.len()) as u8;
             }
 
             State::RepUndo => {
-                let fidx = stack[d].fidx as usize;
-                let curi = (stack[d].curi - 1) as usize;
+                let query_pos = current.query_pos as usize;
+                let rep_cursor = (current.cursor - 1) as usize;
 
-                if curi < dict.rep.len() {
-                    let from_len = dict.rep[curi].from.len();
-                    let to_len = dict.rep[curi].to.len();
-                    let from_bytes = &dict.arena[dict.rep[curi].from];
+                if let Some(rep) = dict.rep.get(rep_cursor) {
+                    let from_len = rep.from.len();
+                    let to_len = rep.to.len();
 
                     if from_len != to_len {
-                        let tail_start = fidx + to_len;
-                        let tail_end = eff_fword_len as usize;
+                        let tail_start = query_pos + to_len;
+                        let tail_end = query_len as usize;
                         if tail_start <= tail_end {
-                            fword.0.copy_within(tail_start..tail_end, fidx + from_len);
+                            query
+                                .bytes
+                                .copy_within(tail_start..tail_end, query_pos + from_len);
                             repextra -= to_len as i32 - from_len as i32;
-                            eff_fword_len = (fword_len as i32 + repextra) as u8;
+                            query_len = (initial_query_len as i32 + repextra) as u8;
                         }
                     }
-                    fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
+
+                    let from_bytes = &dict.arena[rep.from];
+                    query.bytes[query_pos..query_pos + from_len].copy_from_slice(from_bytes);
                 }
 
                 state = State::Rep;
@@ -917,108 +920,106 @@ pub(crate) fn suggest_trie_walk(
 
             State::RepsalIni => {
                 if dict.repsal.is_empty()
-                    || stack[d].score + SCORE_REP >= maxscore
-                    || stack[d].fidx < stack[d].fidxtry
+                    || current.score + SCORE_REP >= max_score
+                    || current.query_pos < current.query_min_pos
                 {
                     state = State::Final;
                     continue;
                 }
 
-                let fidx = stack[d].fidx;
-                if fidx >= eff_fword_len {
+                let query_pos = current.query_pos;
+                if query_pos >= query_len {
                     state = State::Final;
                     continue;
                 }
 
-                let first = dict.repsal_first[fword[fidx] as usize];
+                let first = dict.repsal_first[query[query_pos] as usize];
                 if first < 0 {
                     state = State::Final;
                     continue;
                 }
 
-                stack[d].curi = first;
+                current.cursor = first;
                 state = State::Repsal;
             }
 
             State::Repsal => {
-                let fidx = stack[d].fidx;
-                let curi = stack[d].curi as usize;
+                let query_pos = current.query_pos;
+                let rep_cursor = current.cursor as usize;
 
-                if curi >= dict.repsal.len() {
+                let Some(&RepItem { from, to }) = dict.repsal.get(rep_cursor) else {
+                    state = State::Final;
+                    continue;
+                };
+
+                let from_bytes = &dict.arena[from];
+                if from_bytes[0] != query[query_pos] {
                     state = State::Final;
                     continue;
                 }
 
-                let from_len = dict.repsal[curi].from.len();
-                let to_len = dict.repsal[curi].to.len();
-                let first_byte = dict.arena[dict.repsal[curi].from][0];
+                current.cursor += 1;
 
-                if first_byte != fword[fidx] {
-                    state = State::Final;
+                if (query_pos as usize) + from.len() > query_len as usize {
                     continue;
                 }
 
-                stack[d].curi += 1;
-
-                if (fidx as usize) + from_len > eff_fword_len as usize {
+                if query.bytes[(query_pos as usize)..(query_pos as usize) + from.len()]
+                    != *from_bytes
+                {
                     continue;
                 }
 
-                let from_bytes = &dict.arena[dict.repsal[curi].from];
-                if fword.0[(fidx as usize)..(fidx as usize) + from_len] != *from_bytes {
+                if current.score + SCORE_REP >= max_score {
                     continue;
                 }
 
-                if !can_go_deeper(&mut stack, depth, SCORE_REP, maxscore) {
-                    continue;
-                }
-
-                let to_bytes = &dict.arena[dict.repsal[curi].to];
+                let to_bytes = &dict.arena[to];
 
                 state = State::RepsalUndo;
-                stack[d].state = state;
+                current.state = state;
 
-                if from_len != to_len {
-                    let fidx = fidx as usize;
-                    let tail_start = fidx + from_len;
-                    let tail_end = eff_fword_len as usize;
-                    if tail_start <= tail_end && fidx + to_len + (tail_end - tail_start) < MAXWLEN {
-                        fword.0.copy_within(tail_start..tail_end, fidx + to_len);
-                        repextra += to_len as i32 - from_len as i32;
-                        eff_fword_len = (fword_len as i32 + repextra) as u8;
+                if from.len() != to.len() {
+                    let query_pos = query_pos as usize;
+                    let tail_start = query_pos + from.len();
+                    let tail_end = query_len as usize;
+                    if tail_start <= tail_end
+                        && query_pos + to.len() + (tail_end - tail_start) < MAXWLEN
+                    {
+                        query
+                            .bytes
+                            .copy_within(tail_start..tail_end, query_pos + to.len());
+                        repextra += to.len() as i32 - from.len() as i32;
+                        query_len = (initial_query_len as i32 + repextra) as u8;
                     } else {
                         continue;
                     }
                 }
-                let fidx = fidx as usize;
-                fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
+                let query_pos = query_pos as usize;
+                query.bytes[query_pos..query_pos + to.len()].copy_from_slice(to_bytes);
 
-                go_deeper(&mut stack, depth, SCORE_REP);
-                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
-                depth += 1;
-                state = State::Start;
-                stack[depth as usize].fidxtry = (fidx + to_len) as u8;
+                recurse!(SCORE_REP);
+                current.query_min_pos = (query_pos + to.len()) as u8;
             }
 
             State::RepsalUndo => {
-                let fidx = stack[d].fidx as usize;
-                let curi = (stack[d].curi - 1) as usize;
-
-                if curi < dict.repsal.len() {
-                    let from_len = dict.repsal[curi].from.len();
-                    let to_len = dict.repsal[curi].to.len();
-                    let from_bytes = &dict.arena[dict.repsal[curi].from];
-
-                    if from_len != to_len {
-                        let tail_start = fidx + to_len;
-                        let tail_end = eff_fword_len as usize;
+                let query_pos = current.query_pos as usize;
+                let curi = (current.cursor - 1) as usize;
+                if let Some(&RepItem { from, to }) = dict.repsal.get(curi) {
+                    if from.len() != to.len() {
+                        let tail_start = query_pos + to.len();
+                        let tail_end = query_len as usize;
                         if tail_start <= tail_end {
-                            fword.0.copy_within(tail_start..tail_end, fidx + from_len);
-                            repextra -= to_len as i32 - from_len as i32;
-                            eff_fword_len = (fword_len as i32 + repextra) as u8;
+                            query
+                                .bytes
+                                .copy_within(tail_start..tail_end, query_pos + from.len());
+                            repextra -= to.len() as i32 - from.len() as i32;
+                            query_len = (initial_query_len as i32 + repextra) as u8;
                         }
                     }
-                    fword.0[fidx..fidx + from_len].copy_from_slice(from_bytes);
+
+                    let from_bytes = &dict.arena[from];
+                    query.bytes[query_pos..query_pos + from.len()].copy_from_slice(from_bytes);
                 }
 
                 state = State::Repsal;
@@ -1030,6 +1031,7 @@ pub(crate) fn suggest_trie_walk(
                 }
                 depth -= 1;
                 state = stack[depth as usize].state;
+                current = &mut stack[depth as usize];
             }
         }
     }

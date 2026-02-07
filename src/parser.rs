@@ -731,7 +731,10 @@ fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, Pars
         read_tree_node(r, &mut byts, &mut idxs, node_count, 0)?;
     }
 
-    Ok(WordTree { byts, idxs })
+    Ok(WordTree {
+        node: byts,
+        meta: idxs,
+    })
 }
 
 const SHARED_MASK: u32 = 0x8000000;
