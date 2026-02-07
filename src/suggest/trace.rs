@@ -19,7 +19,8 @@ pub enum Action {
 #[jsony(Binary)]
 pub struct TryStateTrace {
     pub id: u32,
-    pub initial_fword_prefix: [u8; 24],
+    pub query: [u8; 24],
+    pub prefix: [u8; 24],
     pub depth: u8,
     pub score: i32,
     pub actions: Vec<Action>,
@@ -77,19 +78,20 @@ impl Trace {
         }
     }
 
-    pub fn init(&mut self, depth: u8, fword: &[u8], score: i32) {
+    pub fn init(&mut self, depth: u8, query: &[u8], prefix: &[u8], score: i32) {
         let id = self.nodes.len() as u32;
         self.nodes.push(TryStateTrace {
             id,
-            initial_fword_prefix: fword_prefix(fword),
-            depth,
+            query: truncated_24(query),
+            prefix: truncated_24(prefix),
+            depth: depth,
             score,
             actions: Vec::new(),
         });
         self.current[depth as usize] = id;
     }
 
-    pub fn go_deeper(&mut self, parent_depth: u8, fword: &[u8], child_score: i32) {
+    pub fn go_deeper(&mut self, parent_depth: u8, query: &[u8], prefix: &[u8], child_score: i32) {
         let child_id = self.nodes.len() as u32;
 
         let parent_id = self.current[parent_depth as usize];
@@ -100,7 +102,8 @@ impl Trace {
         let child_depth = parent_depth + 1;
         self.nodes.push(TryStateTrace {
             id: child_id,
-            initial_fword_prefix: fword_prefix(fword),
+            query: truncated_24(query),
+            prefix: truncated_24(prefix),
             depth: child_depth,
             score: child_score,
             actions: Vec::new(),
@@ -128,10 +131,10 @@ impl Trace {
     }
 }
 
-fn fword_prefix(fword: &[u8]) -> [u8; 24] {
+fn truncated_24(bytes: &[u8]) -> [u8; 24] {
     let mut prefix = [0u8; 24];
-    let len = fword.len().min(24);
-    prefix[..len].copy_from_slice(&fword[..len]);
+    let len = bytes.len().min(24);
+    prefix[..len].copy_from_slice(&bytes[..len]);
     prefix
 }
 
@@ -384,9 +387,12 @@ impl fmt::Display for Trace {
             actions_per_node.sort_by(|a, b| b.0.cmp(&a.0));
             for &(count, id) in actions_per_node.iter().take(10) {
                 let node = &self.nodes[id as usize];
-                let prefix = &node.initial_fword_prefix;
-                let prefix_end = prefix.iter().position(|&b| b == 0).unwrap_or(16);
-                let prefix_str = String::from_utf8_lossy(&prefix[..prefix_end]);
+                let query = &node.query;
+                let query_end = query.iter().position(|&b| b == 0).unwrap_or(24);
+                let query_str = str::from_utf8(&query[..query_end]).unwrap();
+                let prefix = &node.prefix;
+                let prefix_end = prefix.iter().position(|&b| b == 0).unwrap_or(24);
+                let prefix_str = str::from_utf8(&prefix[..prefix_end]).unwrap();
                 // Count action types in this node
                 let mut n_states = 0u32;
                 let mut n_gd = 0u32;
@@ -400,8 +406,8 @@ impl fmt::Display for Trace {
                 }
                 writeln!(
                     f,
-                    "  node {:>6} depth {:>2} fword={:<16} actions={:<6} (states:{} deeper:{} suggest:{})",
-                    id, node.depth, prefix_str, count, n_states, n_gd, n_sug
+                    "  node {:>6} depth {:>2} query={:<16} prefix={:<16} actions={:<6} (states:{} deeper:{} suggest:{})",
+                    id, node.depth, query_str, prefix_str, count, n_states, n_gd, n_sug
                 )?;
             }
         }

@@ -5,25 +5,26 @@ pub(crate) use trace::{enable_trace, take_trace};
 use super::*;
 use hashbrown::HashMap;
 use jsony::Jsony;
-macro_rules! trace {
-    ($($tt:tt)*) => {};
-}
 
-///Uncomment to enable tracing
 // macro_rules! trace {
-//     (init $depth:expr, $fword:expr, $score:expr) => {
-//         trace::with_trace(|t| t.init($depth, $fword, $score))
-//     };
-//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
-//         trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
-//     };
-//     (enter_state $depth:expr, $state:expr) => {
-//         trace::with_trace(|t| t.enter_state($depth, $state))
-//     };
-//     (suggest $depth:expr, $word:expr, $score:expr) => {
-//         trace::with_trace(|t| t.suggest($depth, $word, $score))
-//     };
+//     ($($tt:tt)*) => {};
 // }
+
+/// Uncomment to enable tracing
+macro_rules! trace {
+    (init $depth:expr, $query:expr, $prefix:expr, $score:expr) => {
+        trace::with_trace(|t| t.init($depth, $query, $prefix, $score))
+    };
+    (go_deeper $depth:expr, $query:expr, $child_score:expr) => {
+        trace::with_trace(|t| t.go_deeper($depth, $query, $child_score))
+    };
+    (enter_state $depth:expr, $state:expr) => {
+        trace::with_trace(|t| t.enter_state($depth, $state))
+    };
+    (suggest $depth:expr, $word:expr, $score:expr) => {
+        trace::with_trace(|t| t.suggest($depth, $word, $score))
+    };
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Jsony)]
 #[repr(u8)]
@@ -60,7 +61,7 @@ struct TryState {
     state: State,
     flags: u8,
     cursor: i16,
-    /// How far have we consumed in the fword to get to this position.
+    /// How far have we consumed in the query to get to this position.
     query_pos: u8,
     /// Don't modify characters before this postion
     query_min_pos: u8,
@@ -388,13 +389,18 @@ pub(crate) fn suggest_trie_walk(
     let mut query_len = initial_query_len;
 
     let mut state = State::Start;
-    trace!(init 0, &query.bytes, 0);
+    trace!(init 0, &query.bytes, &[], 0);
     let mut current = &mut stack[0];
 
     macro_rules! recurse {
         ($score_add: expr) => {{
             trace::with_trace(|t| {
-                t.go_deeper(depth, &query.bytes[0..query_len as usize], current.score)
+                t.go_deeper(
+                    depth,
+                    &query.bytes[0..query_len as usize],
+                    &prefix[0..current.prefix_len as usize],
+                    current.score,
+                )
             });
             let parent = *current;
             depth += 1;
@@ -618,24 +624,17 @@ pub(crate) fn suggest_trie_walk(
                     let query_pos = current.query_pos;
                     if query_pos < query_len && current.score < max_score {
                         let target = query[query_pos];
-                        let mut lo = cursor_start;
-                        let mut hi = (len + 1) as usize;
-                        while lo < hi {
-                            let mid = lo + (hi - lo) / 2;
-                            let c = node[node_head + mid];
-                            if c == target {
-                                current.state = state;
-                                recurse!(0);
-                                current.query_pos += 1;
-                                prefix[current.prefix_len as usize] = target;
-                                current.prefix_len += 1;
-                                current.trie_node = meta[node_head + mid];
-                                break;
-                            } else if c < target {
-                                lo = mid + 1;
-                            } else {
-                                hi = mid;
-                            }
+                        let lo = cursor_start;
+                        let hi = (len + 1) as usize;
+                        let nodes = &node[node_head + lo..node_head + hi];
+                        if let Ok(index) = nodes.binary_search(&target) {
+                            let idx = node_head + cursor_start + index;
+                            current.state = State::Start;
+                            recurse!(0);
+                            current.query_pos += 1;
+                            prefix[current.prefix_len as usize] = target;
+                            current.prefix_len += 1;
+                            current.trie_node = meta[idx];
                         }
                     }
                     continue;
