@@ -1,7 +1,3 @@
-// mod trace;
-// pub use trace::Trace;
-// pub(crate) use trace::{enable_trace, take_trace};
-
 use super::*;
 use hashbrown::HashMap;
 
@@ -9,7 +5,10 @@ macro_rules! trace {
     ($($tt:tt)*) => {};
 }
 
-/// Uncomment to enable tracing
+// Uncomment to enable tracing
+// mod trace;
+// pub use trace::Trace;
+// pub(crate) use trace::{enable_trace, take_trace};
 // macro_rules! trace {
 //     (init $depth:expr, $query:expr, $prefix:expr, $score:expr) => {
 //         trace::with_trace(|t| t.init($depth, $query, $prefix, $score))
@@ -94,7 +93,7 @@ impl Default for TryState {
 
 const MAX_DEPTH: u8 = 253;
 const SUG_CLEAN_COUNT: usize = 150;
-const SUG_MAX_COUNT: usize = SUG_CLEAN_COUNT + 50;
+const SUG_CLEANUP_HEADROOM: usize = 50;
 
 fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
     match scored.entry_ref(word) {
@@ -112,13 +111,17 @@ fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
 
 /// Reduce maxscore when too many suggestions have accumulated, matching
 /// Neovim's cleanup_suggestions() behavior. Returns the new maxscore.
-fn cleanup_suggestions(scored: &mut HashMap<Vec<u8>, i32>, maxscore: i32) -> i32 {
+fn cleanup_suggestions(
+    scored: &mut HashMap<Vec<u8>, i32>,
+    maxscore: i32,
+    clean_count: usize,
+) -> i32 {
     let mut scores: Vec<i32> = scored.values().copied().collect();
-    if scores.len() <= SUG_CLEAN_COUNT {
+    if scores.len() <= clean_count {
         return maxscore;
     }
-    scores.select_nth_unstable(SUG_CLEAN_COUNT - 1);
-    let threshold = scores[SUG_CLEAN_COUNT - 1];
+    scores.select_nth_unstable(clean_count - 1);
+    let threshold = scores[clean_count - 1];
     scored.retain(|_, &mut score| score <= threshold);
     threshold
 }
@@ -368,10 +371,12 @@ pub(crate) fn suggest_trie_walk(
     scored: &mut HashMap<Vec<u8>, i32>,
     maxscore: i32,
     badflags: u8,
+    max_count: usize,
 ) {
     if dict.foldtree.node.is_empty() {
         return;
     }
+    let clean_count = max_count.max(SUG_CLEAN_COUNT);
 
     let node: &[u8] = &dict.foldtree.node;
     let meta: &[u32] = &dict.foldtree.meta;
@@ -443,7 +448,7 @@ pub(crate) fn suggest_trie_walk(
 
                 // perf: Might not need null check
                 if cur > len || node[node_head + cur as usize] != 0 {
-                    if !(depth < MAX_DEPTH) {
+                    if depth >= MAX_DEPTH  {
                         state = State::Final;
                         continue;
                     }
@@ -533,8 +538,8 @@ pub(crate) fn suggest_trie_walk(
                         add_suggestion(scored, &word, total);
                         trace!(suggest depth, &word, total);
 
-                        if scored.len() > SUG_MAX_COUNT {
-                            max_score = cleanup_suggestions(scored, max_score);
+                        if scored.len() > clean_count + SUG_CLEANUP_HEADROOM {
+                            max_score = cleanup_suggestions(scored, max_score, clean_count);
                         }
                     }
                 }
@@ -550,7 +555,7 @@ pub(crate) fn suggest_trie_walk(
                         extra = dict.score_wordcount_adj(extra, &prefix[..prefix_len], true);
                     }
                     if current.score + extra < max_score {
-                        if !(depth < MAX_DEPTH) {
+                        if depth >= MAX_DEPTH  {
                             state = State::Final;
                             continue;
                         }
@@ -587,8 +592,8 @@ pub(crate) fn suggest_trie_walk(
                         current.cursor = 1;
 
                         let query_pos = current.query_pos;
-                        if query_pos < query_len {
-                            if current.score + SCORE_DEL < max_score {
+                        if query_pos < query_len
+                            && current.score + SCORE_DEL < max_score {
                                 current.state = state;
 
                                 recurse!(SCORE_DEL);
@@ -604,7 +609,6 @@ pub(crate) fn suggest_trie_walk(
                                     current.score -= SCORE_DEL - SCORE_DELDUP;
                                 }
                             }
-                        }
                     } else {
                         state = State::Final;
                     }

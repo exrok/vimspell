@@ -732,8 +732,8 @@ fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, Pars
     }
 
     Ok(WordTree {
-        node: node,
-        meta: meta,
+        node,
+        meta,
     })
 }
 

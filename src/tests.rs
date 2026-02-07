@@ -70,9 +70,9 @@ fn test_suggestions() {
     let dict = load_dict();
 
     let word = b"sampl";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
 
-    assert!(suggestions.iter().any(|s| s == b"sample"));
+    assert!(suggestions.iter().any(|(s, _)| s == b"sample"));
 }
 
 #[test]
@@ -583,13 +583,13 @@ fn test_suggestions_with_sal() {
     let dict = load_dict();
     // The existing "sampl" -> "sample" should still work.
     let word = b"sampl";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"sample"),
+        suggestions.iter().any(|(s, _)| s == b"sample"),
         "should suggest 'sample' for 'sampl', got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -662,13 +662,13 @@ fn test_rep_suggestions() {
     };
 
     let word = b"fone";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"phone"),
+        suggestions.iter().any(|(s, _)| s == b"phone"),
         "should suggest 'phone' for 'fone' via REP rule f->ph, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -728,15 +728,15 @@ fn test_rep_score_is_low() {
     };
 
     let word = b"fase";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     // "phase" should come before "phast" since "fase" -> REP "f"->"ph" -> "phase" is exact,
     // while "phast" requires both REP + substitution.
     assert!(
-        !suggestions.is_empty() && suggestions[0] == b"phase",
+        !suggestions.is_empty() && suggestions[0].0 == b"phase",
         "REP match 'phase' should be ranked first for 'fase', got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -968,18 +968,18 @@ fn test_region_suggestions_penalty() {
 
     // With REGION_ALL, both should be suggested.
     let word = b"gry";
-    let suggestions = dict.suggestions(word);
-    assert!(suggestions.iter().any(|s| s == b"gray"));
-    assert!(suggestions.iter().any(|s| s == b"grey"));
+    let suggestions = dict.suggestions(word, 25, 350);
+    assert!(suggestions.iter().any(|(s, _)| s == b"gray"));
+    assert!(suggestions.iter().any(|(s, _)| s == b"grey"));
 
     // With region "us", "grey" should still appear but "gray" should rank first.
     dict.set_region(b"us");
-    let suggestions = dict.suggestions(word);
-    assert!(suggestions.iter().any(|s| s == b"gray"));
-    assert!(suggestions.iter().any(|s| s == b"grey"));
+    let suggestions = dict.suggestions(word, 25, 350);
+    assert!(suggestions.iter().any(|(s, _)| s == b"gray"));
+    assert!(suggestions.iter().any(|(s, _)| s == b"grey"));
     // "gray" should be first (no region penalty) vs "grey" (SCORE_REGION penalty).
-    let gray_pos = suggestions.iter().position(|s| s == b"gray").unwrap();
-    let grey_pos = suggestions.iter().position(|s| s == b"grey").unwrap();
+    let gray_pos = suggestions.iter().position(|(s, _)| s == b"gray").unwrap();
+    let grey_pos = suggestions.iter().position(|(s, _)| s == b"grey").unwrap();
     assert!(
         gray_pos < grey_pos,
         "gray (no region penalty) should rank before grey (wrong region), \
@@ -1002,7 +1002,6 @@ fn test_char_roundtrip() {
 #[test]
 fn test_map_parsing() {
     let dict = load_dict();
-    assert!(dict.has_map(), "English dictionary should have MAP data");
     let map = dict.map.as_ref().unwrap();
     assert!(
         map.map_array[b'a' as usize] != 0,
@@ -1106,13 +1105,13 @@ fn test_map_similar_substitution_score() {
     };
 
     let word = b"car";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"cat"),
+        suggestions.iter().any(|(s, _)| s == b"cat"),
         "should suggest 'cat' for 'car' when r/t are similar, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1205,16 +1204,16 @@ fn test_common_words_suggestion_boost() {
     };
 
     let word = b"bxt";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
 
-    let bat_pos = suggestions.iter().position(|s| s == b"bat");
-    let bet_pos = suggestions.iter().position(|s| s == b"bet");
+    let bat_pos = suggestions.iter().position(|(s, _)| s == b"bat");
+    let bet_pos = suggestions.iter().position(|(s, _)| s == b"bet");
     assert!(
         bat_pos.is_some() && bet_pos.is_some(),
         "both 'bat' and 'bet' should be suggested, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
     assert!(
@@ -1283,13 +1282,13 @@ fn test_score_wordcount_adj_thresholds() {
 fn test_suggest_swap() {
     let dict = load_dict();
     let word = b"hte";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"the"),
+        suggestions.iter().any(|(s, _)| s == b"the"),
         "should suggest 'the' for 'hte' via swap, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1298,13 +1297,13 @@ fn test_suggest_swap() {
 fn test_suggest_multi_edit() {
     let dict = load_dict();
     let word = b"teh";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"the"),
+        suggestions.iter().any(|(s, _)| s == b"the"),
         "should suggest 'the' for 'teh' via multi-edit, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1313,13 +1312,13 @@ fn test_suggest_multi_edit() {
 fn test_suggest_word_split() {
     let dict = load_dict();
     let word = b"inthe";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"in the"),
+        suggestions.iter().any(|(s, _)| s == b"in the"),
         "should suggest 'in the' for 'inthe' via split, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1328,13 +1327,13 @@ fn test_suggest_word_split() {
 fn test_suggest_deletion() {
     let dict = load_dict();
     let word = b"helllo";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"hello"),
+        suggestions.iter().any(|(s, _)| s == b"hello"),
         "should suggest 'hello' for 'helllo' via deletion, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1343,13 +1342,13 @@ fn test_suggest_deletion() {
 fn test_suggest_insertion() {
     let dict = load_dict();
     let word = b"helo";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|s| s == b"hello"),
+        suggestions.iter().any(|(s, _)| s == b"hello"),
         "should suggest 'hello' for 'helo' via insertion, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1381,7 +1380,7 @@ fn bench_suggest_perf() {
 
     for &typo_word in typos {
         let start = std::time::Instant::now();
-        let suggestions = dict.suggestions(typo_word);
+        let suggestions = dict.suggestions(typo_word, 25, 350);
         let elapsed = start.elapsed();
         eprintln!(
             "{:<20} {:>2} suggestions  {:>8.3} ms",
@@ -1430,7 +1429,7 @@ fn test_user_dict_add_good_word() {
     assert!(!dict.check_word(b"xyzabc"));
 
     // Add it as a good word
-    dict.add_good_word(b"xyzabc");
+    dict.accept_word(b"xyzabc");
 
     // Now it should be valid
     assert!(dict.check_word(b"xyzabc"));
@@ -1455,7 +1454,7 @@ fn test_user_dict_remove_word() {
     let mut dict = load_dict();
 
     // Add a good word
-    dict.add_good_word(b"testword");
+    dict.accept_word(b"testword");
     assert!(dict.check_word(b"testword"));
 
     // Remove it
@@ -1474,7 +1473,7 @@ fn test_user_dict_good_overrides_banned() {
     assert!(!dict.check_word(b"testword"));
 
     // Add as good (should override banned)
-    dict.add_good_word(b"testword");
+    dict.accept_word(b"testword");
     assert!(dict.check_word(b"testword"));
 }
 
@@ -1483,7 +1482,7 @@ fn test_user_dict_banned_overrides_good() {
     let mut dict = load_dict();
 
     // Add as good
-    dict.add_good_word(b"testword");
+    dict.accept_word(b"testword");
     assert!(dict.check_word(b"testword"));
 
     // Ban it (should override good)
@@ -1496,7 +1495,7 @@ fn test_user_dict_spell_check_iter() {
     let mut dict = load_dict();
 
     // Add "sampl" as a good word
-    dict.add_good_word(b"sampl");
+    dict.accept_word(b"sampl");
 
     // "sampl" should no longer be detected as a typo
     let input = b"This is a sampl text with no typos";
@@ -1529,18 +1528,18 @@ fn test_user_dict_in_suggestions() {
     let mut dict = load_dict();
 
     // Add a custom word that's close to a typo
-    dict.add_good_word(b"samply");
+    dict.accept_word(b"samply");
 
     let word = b"sampl";
-    let suggestions = dict.suggestions(word);
+    let suggestions = dict.suggestions(word, 25, 350);
 
     // "samply" should appear in suggestions
     assert!(
-        suggestions.iter().any(|s| s == b"samply"),
+        suggestions.iter().any(|(s, _)| s == b"samply"),
         "User word 'samply' should appear in suggestions, got {:?}",
         suggestions
             .iter()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1550,7 +1549,7 @@ fn test_user_dict_clear() {
     let mut dict = load_dict();
 
     // Add some words
-    dict.add_good_word(b"word1");
+    dict.accept_word(b"word1");
     dict.ban_word(b"word2");
 
     // Verify they work
@@ -1572,7 +1571,7 @@ fn test_user_dict_case_sensitive() {
     let mut dict = load_dict();
 
     // Add lowercase version
-    dict.add_good_word(b"myword");
+    dict.accept_word(b"myword");
 
     // Lowercase should be valid
     assert!(dict.check_word(b"myword"));

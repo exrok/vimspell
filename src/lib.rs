@@ -4,7 +4,7 @@
 //! Load a Vim spell dictionary and check words, get suggestions, or scan entire documents
 //! for typos. Works with any language that has a `.spl` file (English, German, Spanish, etc.).
 //!
-//! Supports the good stuff: compound words, regional variants (US/UK English), phonetic
+//! Supports most features including regional variants (US/UK English), phonetic
 //! similarity, and runtime user dictionaries.
 //!
 //! # Quick Start
@@ -20,8 +20,8 @@
 //!     println!("Correct!");
 //! }
 //!
-//! // Get suggestions
-//! let suggestions = dict.suggestions(b"speling");
+//! // Get suggestions (top 25, max score 350)
+//! let suggestions = dict.suggestions(b"speling", 25, 350);
 //! println!("Did you mean: {:?}", suggestions);
 //!
 //! // Find typos in text
@@ -33,7 +33,7 @@
 //!
 //! # Getting Dictionary Files
 //!
-//! Grab pre-built `.spl` files from [Vim's FTP site](ftp://ftp.vim.org/pub/vim/runtime/spell/)
+//! Grab pre-built `.spl` files from [Vim's FTP site](https://ftp.nluug.nl/pub/vim/runtime/spell/en.utf-8.spl)
 //! or make your own with Vim's `:mkspell` command.
 //!
 //! # Examples
@@ -44,7 +44,7 @@
 //! # use vimspell::Dictionary;
 //! # let bytes = std::fs::read("en.utf-8.spl").unwrap();
 //! # let mut dict = Dictionary::parse(&bytes).unwrap();
-//! dict.add_good_word(b"rustdoc");
+//! dict.accept_word(b"rustdoc");
 //! dict.ban_word(b"irregardless");
 //! ```
 //!
@@ -680,8 +680,8 @@ struct SalInfo {
 /// assert!(!dict.check_word(b"wrng"));
 ///
 /// // Get suggestions
-/// let suggestions = dict.suggestions(b"speling");
-/// assert!(suggestions.contains(&b"spelling".to_vec()));
+/// let suggestions = dict.suggestions(b"speling", 25, 350);
+/// assert!(suggestions.iter().any(|(w, _)| w == b"spelling"));
 /// ```
 pub struct Dictionary {
     arena: Arena,
@@ -808,6 +808,29 @@ impl Dictionary {
         SpellCheckIter::new(self, input)
     }
 
+    /// Gets spelling suggestions with scores for a misspelled word.
+    ///
+    /// Returns up to `max_count` `(word, score)` pairs sorted by score (lower is better).
+    /// Only suggestions with a final score <= `max_score` are returned.
+    ///
+    /// Recommanded max_score values between 200 and 350. Large max_score values
+    /// will take longer to compute then smaller ones.
+    pub fn suggestions(
+        &self,
+        word: &[u8],
+        max_count: usize,
+        max_score: i32,
+    ) -> Vec<(Vec<u8>, i32)> {
+        if word.is_empty() || word.len() > MAXWLEN {
+            return Vec::new();
+        }
+        let scored = self.suggest_core(word, max_count, max_score);
+        let mut results = self.rescore_and_sort(scored, word, word.len());
+        results.retain(|&(_, score)| score <= max_score);
+        results.truncate(max_count);
+        results
+    }
+
     /// Returns the region names defined in this dictionary (e.g., `b"us"`, `b"gb"`, `b"ca"`).
     pub fn region_names(&self) -> &[[u8; 2]] {
         &self.regions
@@ -824,7 +847,7 @@ impl Dictionary {
             }
         }
         self.region = REGION_ALL;
-        return false;
+        false
     }
 
     /// Clears the active region filter, accepting words from all regions.
@@ -835,7 +858,7 @@ impl Dictionary {
     /// Adds a word to the user dictionary as correct.
     ///
     /// The word will be accepted during spell checking even if not in the main dictionary.
-    pub fn add_good_word(&mut self, word: &[u8]) {
+    pub fn accept_word(&mut self, word: &[u8]) {
         let _ = self
             .user_banned_words
             .find_entry(self.hasher.hash_one(word), |bytes| {
@@ -872,7 +895,7 @@ impl Dictionary {
         }
     }
 
-    /// Removes a word from the user dictionary (both good and banned lists).
+    /// Removes a word from the user dictionary (both accepted and banned lists).
     pub fn remove_user_word(&mut self, word: &[u8]) {
         let _ = self
             .user_good_words
@@ -887,21 +910,6 @@ impl Dictionary {
                 &self.arena[*bytes] == word
             })
             .map(|entry| entry.remove());
-    }
-
-    /// Returns `true` if the dictionary has SAL (Sound Alike) phonetic data for suggestions.
-    pub fn has_sal(&self) -> bool {
-        self.sal.is_some()
-    }
-
-    /// Returns `true` if the dictionary has MAP data for similar-character scoring.
-    pub fn has_map(&self) -> bool {
-        self.map.is_some()
-    }
-
-    /// Returns `true` if the dictionary has common word frequency data.
-    pub fn has_common_words(&self) -> bool {
-        !self.common_words.is_empty()
     }
 
     fn score_wordcount_adj(&self, score: i32, word: &[u8], split: bool) -> i32 {
@@ -1137,7 +1145,8 @@ impl Dictionary {
         }
     }
 
-    fn suggest_core(&self, word: &[u8]) -> HashMap<Vec<u8>, i32> {
+    fn suggest_core(&self, word: &[u8], max_count: usize, max_score: i32) -> HashMap<Vec<u8>, i32> {
+        let max_score = max_score.min(SCORE_MAXINIT);
         let mut scored = HashMap::new();
         let word_len = word.len();
 
@@ -1155,48 +1164,13 @@ impl Dictionary {
             &mut fword,
             word_len as u8,
             &mut scored,
-            SCORE_MAXINIT,
+            max_score,
             badflags,
+            max_count,
         );
 
-        self.add_user_words_to_suggestions(word, &mut scored, SCORE_MAXINIT);
+        self.add_user_words_to_suggestions(word, &mut scored, max_score);
         scored
-    }
-
-    /// Gets up to `max_count` spelling suggestions for a misspelled word.
-    pub fn suggestions_n(&self, word: &[u8], max_count: usize) -> Vec<Vec<u8>> {
-        if word.is_empty() || word.len() > MAXWLEN {
-            return Vec::new();
-        }
-        let scored = self.suggest_core(word);
-        let mut results = self.rescore_and_sort(scored, word, word.len());
-        results.truncate(max_count);
-        results.into_iter().map(|(w, _)| w).collect()
-    }
-
-    /// Gets up to `max_count` spelling suggestions with scores.
-    pub fn suggestions_scored_n(&self, word: &[u8], max_count: usize) -> Vec<(Vec<u8>, i32)> {
-        if word.is_empty() || word.len() > MAXWLEN {
-            return Vec::new();
-        }
-        let scored = self.suggest_core(word);
-        let mut results = self.rescore_and_sort(scored, word, word.len());
-        results.truncate(max_count);
-        results
-    }
-
-    /// Gets spelling suggestions for a misspelled word.
-    ///
-    /// Returns up to 25 suggestions ranked by similarity (edit distance, phonetic similarity, etc.).
-    pub fn suggestions(&self, word: &[u8]) -> Vec<Vec<u8>> {
-        self.suggestions_n(word, 25)
-    }
-
-    /// Gets spelling suggestions with their scores for a misspelled word.
-    ///
-    /// Returns up to 25 `(word, score)` pairs sorted by score (lower is better).
-    pub fn suggestions_scored(&self, word: &[u8]) -> Vec<(Vec<u8>, i32)> {
-        self.suggestions_scored_n(word, 25)
     }
 
     /// Rescore suggestions using SAL sound similarity and sort by
@@ -1277,6 +1251,7 @@ impl Dictionary {
             &mut scored,
             SCORE_MAXINIT,
             badflags,
+            25,
         );
 
         // (word, pre_sal, sal_score, final_score)
@@ -1845,77 +1820,6 @@ impl Dictionary {
             return WordResult::WrongRegion;
         }
         WordResult::NotFound
-    }
-
-    /// Returns `true` if compound word support is enabled for this dictionary.
-    pub fn has_compound_rules(&self) -> bool {
-        !self.comp_rules.is_empty()
-    }
-
-    /// Iterates over words with compound flags, calling the callback with `(word, flags)`.
-    pub fn iter_compound_words<F>(&self, mut callback: F)
-    where
-        F: FnMut(&[u8], u32),
-    {
-        let mut word_buf = [0u8; MAXWLEN];
-        self.iter_tree_words(&self.foldtree, &mut word_buf, 0, &mut callback);
-    }
-
-    fn iter_tree_words<F>(
-        &self,
-        tree: &WordTree,
-        word_buf: &mut [u8],
-        depth: usize,
-        callback: &mut F,
-    ) where
-        F: FnMut(&[u8], u32),
-    {
-        if tree.is_empty() {
-            return;
-        }
-        self.iter_tree_node(tree, 0, word_buf, depth, callback);
-    }
-
-    fn iter_tree_node<F>(
-        &self,
-        tree: &WordTree,
-        arridx: usize,
-        word_buf: &mut [u8],
-        depth: usize,
-        callback: &mut F,
-    ) where
-        F: FnMut(&[u8], u32),
-    {
-        let node = &tree.node;
-        let meta = &tree.meta;
-
-        let Some(&sibling_count) = node.get(arridx) else {
-            return;
-        };
-        let sibling_count = sibling_count as usize;
-
-        for i in 0..sibling_count {
-            let idx = arridx + 1 + i;
-            let Some(&b) = node.get(idx) else {
-                continue;
-            };
-            let Some(&flags_or_idx) = meta.get(idx) else {
-                continue;
-            };
-
-            if b == 0 {
-                let comp_flag = (flags_or_idx >> 24) as u8;
-                if comp_flag != 0 {
-                    callback(&word_buf[..depth], flags_or_idx);
-                }
-            } else if depth < word_buf.len() {
-                word_buf[depth] = b;
-                let child_idx = flags_or_idx as usize;
-                if child_idx > 0 && child_idx < node.len() {
-                    self.iter_tree_node(tree, child_idx, word_buf, depth + 1, callback);
-                }
-            }
-        }
     }
 }
 

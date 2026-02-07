@@ -2,6 +2,14 @@
 name = "vimspell"
 version = "0.1.0"
 edition = "2024"
+authors = ["Thomas Dagenais <exrok@i64.dev>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/exrok/jsony"
+description = "Native Rust library for spellchecking based on vimspell database"
+keywords = ["spellcheck", "spelling", "vim"]
+categories = ["algorithms", "text-processing"]
+rust-version = "1.90"
 
 [profile.release]
 debug = 1
