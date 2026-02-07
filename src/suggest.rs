@@ -6,25 +6,25 @@ use super::*;
 use hashbrown::HashMap;
 use jsony::Jsony;
 
-// macro_rules! trace {
-//     ($($tt:tt)*) => {};
-// }
+macro_rules! trace {
+    ($($tt:tt)*) => {};
+}
 
 /// Uncomment to enable tracing
-macro_rules! trace {
-    (init $depth:expr, $query:expr, $prefix:expr, $score:expr) => {
-        trace::with_trace(|t| t.init($depth, $query, $prefix, $score))
-    };
-    (go_deeper $depth:expr, $query:expr, $child_score:expr) => {
-        trace::with_trace(|t| t.go_deeper($depth, $query, $child_score))
-    };
-    (enter_state $depth:expr, $state:expr) => {
-        trace::with_trace(|t| t.enter_state($depth, $state))
-    };
-    (suggest $depth:expr, $word:expr, $score:expr) => {
-        trace::with_trace(|t| t.suggest($depth, $word, $score))
-    };
-}
+// macro_rules! trace {
+//     (init $depth:expr, $query:expr, $prefix:expr, $score:expr) => {
+//         trace::with_trace(|t| t.init($depth, $query, $prefix, $score))
+//     };
+//     (go_deeper $depth:expr, $query:expr, $child_score:expr) => {
+//         trace::with_trace(|t| t.go_deeper($depth, $query, $child_score))
+//     };
+//     (enter_state $depth:expr, $state:expr) => {
+//         trace::with_trace(|t| t.enter_state($depth, $state))
+//     };
+//     (suggest $depth:expr, $word:expr, $score:expr) => {
+//         trace::with_trace(|t| t.suggest($depth, $word, $score))
+//     };
+// }
 
 #[derive(Clone, Copy, PartialEq, Eq, Jsony)]
 #[repr(u8)]
@@ -66,7 +66,7 @@ struct TryState {
     /// Don't modify characters before this postion
     query_min_pos: u8,
     prefix_len: u8,
-    deleted_fword_pos: u8,
+    deleted_query_pos: u8,
     /// In the trie-walking states (Start, Plain, InsPrep, Ins) cursor is a child index within a trie node (always >= 1).
     /// But in Rep/Repsal states it's repurposed to hold an index into the rep/repsal arrays,
     /// Tracks last deletion to avoid reinserting at that position
@@ -86,7 +86,7 @@ impl Default for TryState {
             query_min_pos: 0,
             prefix_len: 0,
             flags: 0,
-            deleted_fword_pos: 0,
+            deleted_query_pos: 0,
             split_prefix_pos: 0,
             split_query_pos: 0,
             split_first_word_flags: 0,
@@ -387,7 +387,6 @@ pub(crate) fn suggest_trie_walk(
     let mut depth: u8 = 0;
     let mut repextra: i32 = 0;
     let mut query_len = initial_query_len;
-
     let mut state = State::Start;
     trace!(init 0, &query.bytes, &[], 0);
     let mut current = &mut stack[0];
@@ -502,8 +501,7 @@ pub(crate) fn suggest_trie_walk(
                 if query_ends && goodword_ends && current.query_pos >= current.query_min_pos {
                     let split_off = current.split_prefix_pos as usize;
                     let is_split = split_off > 0;
-
-                    // Build cased suggestion word
+                    // Note: moveing this vec out reduces performance.
                     let mut word = Vec::with_capacity(prefix_len + 2);
                     if is_split {
                         build_cased_word(
@@ -600,7 +598,7 @@ pub(crate) fn suggest_trie_walk(
                                 recurse!(SCORE_DEL);
 
                                 current.flags |= TSF_DIDDEL;
-                                current.deleted_fword_pos = query_pos;
+                                current.deleted_query_pos = query_pos;
                                 current.query_pos += 1;
 
                                 let new_query_pos = current.query_pos;
@@ -617,8 +615,10 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
-                // When substitution exceeds budget, binary search for exact match only.
-                if current.score + SCORE_SUBST >= max_score {
+                // When substitution exceeds budget, or deletion was just performed
+                // (substitutions after deletion are redundant with the parent's
+                // substitution-then-deletion paths), binary search for exact match only.
+                if current.score + SCORE_SUBST >= max_score || current.flags & TSF_DIDDEL != 0 {
                     let cursor_start = current.cursor as usize;
                     current.cursor = len + 1;
                     let query_pos = current.query_pos;
@@ -658,7 +658,7 @@ pub(crate) fn suggest_trie_walk(
                 if new_score != 0
                     && (current.query_pos < current.query_min_pos
                         || ((current.flags & TSF_DIDDEL) != 0
-                            && c == query[current.deleted_fword_pos]))
+                            && c == query[current.deleted_query_pos]))
                 {
                     continue;
                 }
@@ -683,7 +683,11 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::InsPrep => {
-                if current.flags & TSF_DIDDEL != 0 || current.score + SCORE_INS >= max_score {
+                if current.flags & TSF_DIDDEL != 0
+                    || current.score + SCORE_INS >= max_score
+                    || (current.query_pos == 0
+                        && current.prefix_len >= current.split_prefix_pos + 2)
+                {
                     state = after_ins!();
                     continue;
                 }
