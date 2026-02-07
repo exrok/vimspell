@@ -60,6 +60,7 @@ pub fn take_trace() -> Option<Trace> {
     TRACER.with_borrow_mut(|t| t.take())
 }
 
+#[allow(dead_code)]
 pub fn with_trace(f: impl FnOnce(&mut Trace)) {
     TRACER.with_borrow_mut(|t| {
         if let Some(trace) = t.as_mut() {

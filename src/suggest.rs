@@ -9,19 +9,12 @@ macro_rules! trace {
     ($($tt:tt)*) => {};
 }
 
+// Uncomment to enable tracing
 // macro_rules! trace {
-//     (init $depth:expr, $fword:expr, $score:expr) => {
-//         trace::with_trace(|t| t.init($depth, $fword, $score))
-//     };
-//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
-//         trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
-//     };
-//     (enter_state $depth:expr, $state:expr) => {
-//         trace::with_trace(|t| t.enter_state($depth, $state))
-//     };
-//     (suggest $depth:expr, $word:expr, $score:expr) => {
-//         trace::with_trace(|t| t.suggest($depth, $word, $score))
-//     };
+//     (init $depth:expr, $fword:expr, $score:expr) => { trace::with_trace(|t| t.init($depth, $fword, $score)) };
+//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => { trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score)) };
+//     (enter_state $depth:expr, $state:expr) => { trace::with_trace(|t| t.enter_state($depth, $state)) };
+//     (suggest $depth:expr, $word:expr, $score:expr) => { trace::with_trace(|t| t.suggest($depth, $word, $score)) };
 // }
 
 #[derive(Clone, Copy, PartialEq, Eq, Jsony)]
@@ -416,8 +409,6 @@ pub(crate) fn suggest_trie_walk(
                     current = &mut stack[depth as usize];
                     state = current.state;
                     continue;
-                    // state = State::Final;
-                    // continue;
                 };
 
                 let len = len as i16;
@@ -594,6 +585,36 @@ pub(crate) fn suggest_trie_walk(
                     continue;
                 }
 
+                // When substitution exceeds budget, binary search for exact match only.
+                if current.score + SCORE_SUBST >= max_score {
+                    let cursor_start = current.cursor as usize;
+                    current.cursor = len + 1;
+                    let query_pos = current.query_pos;
+                    if query_pos < query_len && current.score < max_score {
+                        let target = query[query_pos];
+                        let mut lo = cursor_start;
+                        let mut hi = (len + 1) as usize;
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let c = node[node_head + mid];
+                            if c == target {
+                                current.state = state;
+                                recurse!(0);
+                                current.query_pos += 1;
+                                prefix[current.prefix_len as usize] = target;
+                                current.prefix_len += 1;
+                                current.trie_node = meta[node_head + mid];
+                                break;
+                            } else if c < target {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let idx = node_head + current.cursor as usize;
                 current.cursor += 1;
                 let c = node[idx];
@@ -637,7 +658,9 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::InsPrep => {
-                if current.flags & TSF_DIDDEL != 0 {
+                if current.flags & TSF_DIDDEL != 0
+                    || current.score + SCORE_INS >= max_score
+                {
                     state = State::Swap;
                     continue;
                 }
@@ -665,6 +688,11 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::Ins => {
+                if current.score + SCORE_INS >= max_score {
+                    state = State::Swap;
+                    continue;
+                }
+
                 let node_head = current.trie_node as usize;
                 let Some(&len) = node.get(node_head) else {
                     state = State::Swap;
