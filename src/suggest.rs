@@ -9,12 +9,20 @@ macro_rules! trace {
     ($($tt:tt)*) => {};
 }
 
-// Uncomment to enable tracing
+///Uncomment to enable tracing
 // macro_rules! trace {
-//     (init $depth:expr, $fword:expr, $score:expr) => { trace::with_trace(|t| t.init($depth, $fword, $score)) };
-//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => { trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score)) };
-//     (enter_state $depth:expr, $state:expr) => { trace::with_trace(|t| t.enter_state($depth, $state)) };
-//     (suggest $depth:expr, $word:expr, $score:expr) => { trace::with_trace(|t| t.suggest($depth, $word, $score)) };
+//     (init $depth:expr, $fword:expr, $score:expr) => {
+//         trace::with_trace(|t| t.init($depth, $fword, $score))
+//     };
+//     (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
+//         trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
+//     };
+//     (enter_state $depth:expr, $state:expr) => {
+//         trace::with_trace(|t| t.enter_state($depth, $state))
+//     };
+//     (suggest $depth:expr, $word:expr, $score:expr) => {
+//         trace::with_trace(|t| t.suggest($depth, $word, $score))
+//     };
 // }
 
 #[derive(Clone, Copy, PartialEq, Eq, Jsony)]
@@ -385,6 +393,9 @@ pub(crate) fn suggest_trie_walk(
 
     macro_rules! recurse {
         ($score_add: expr) => {{
+            trace::with_trace(|t| {
+                t.go_deeper(depth, &query.bytes[0..query_len as usize], current.score)
+            });
             let parent = *current;
             depth += 1;
             current = &mut stack[depth as usize];
@@ -395,6 +406,21 @@ pub(crate) fn suggest_trie_walk(
             current.cursor = 1;
             state = State::Start;
         }};
+    }
+    // When Ins/InsPrep finishes, determine if Swap/Rep/Repsal can all be skipped.
+    // SCORE_REP (65) is the cheapest remaining operation; if it's over budget,
+    // Swap (75) is too. The query_pos checks match the guards in Swap/RepIni/RepsalIni.
+    macro_rules! after_ins {
+        () => {
+            if current.score + SCORE_REP >= max_score
+                || current.query_pos >= query_len
+                || current.query_pos < current.query_min_pos
+            {
+                State::Final
+            } else {
+                State::Swap
+            }
+        };
     }
     loop {
         trace!(enter_state depth, state);
@@ -658,10 +684,8 @@ pub(crate) fn suggest_trie_walk(
             }
 
             State::InsPrep => {
-                if current.flags & TSF_DIDDEL != 0
-                    || current.score + SCORE_INS >= max_score
-                {
-                    state = State::Swap;
+                if current.flags & TSF_DIDDEL != 0 || current.score + SCORE_INS >= max_score {
+                    state = after_ins!();
                     continue;
                 }
 
@@ -676,7 +700,7 @@ pub(crate) fn suggest_trie_walk(
 
                 loop {
                     if current.cursor > len {
-                        state = State::Swap;
+                        state = after_ins!();
                         break;
                     }
                     if node[arridx + current.cursor as usize] != 0 {
@@ -689,19 +713,19 @@ pub(crate) fn suggest_trie_walk(
 
             State::Ins => {
                 if current.score + SCORE_INS >= max_score {
-                    state = State::Swap;
+                    state = after_ins!();
                     continue;
                 }
 
                 let node_head = current.trie_node as usize;
                 let Some(&len) = node.get(node_head) else {
-                    state = State::Swap;
+                    state = after_ins!();
                     continue;
                 };
                 let len = len as i16;
 
                 if current.cursor > len {
-                    state = State::Swap;
+                    state = after_ins!();
                     continue;
                 }
 
@@ -709,7 +733,7 @@ pub(crate) fn suggest_trie_walk(
                 current.cursor += 1;
 
                 let Some(&c) = node.get(node_index) else {
-                    state = State::Swap;
+                    state = after_ins!();
                     continue;
                 };
 
