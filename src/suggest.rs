@@ -214,8 +214,8 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let byts = &keeptree.node;
-    let idxs = &keeptree.meta;
+    let node = &keeptree.node;
+    let meta = &keeptree.meta;
     let fword_len = fword.len();
 
     let uword: Vec<u8> = fword.iter().map(|&b| b.to_ascii_uppercase()).collect();
@@ -235,9 +235,9 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
         if d == fword_len {
             // Check for word-end (NUL byte) at this position
             let ai = arr[d];
-            if ai < byts.len() {
-                let len = byts[ai] as usize;
-                if len > 0 && ai + 1 < byts.len() && byts[ai + 1] == 0 {
+            if ai < node.len() {
+                let len = node[ai] as usize;
+                if len > 0 && ai + 1 < node.len() && node[ai + 1] == 0 {
                     return Some(kword.clone());
                 }
             }
@@ -263,19 +263,19 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
         };
 
         let ai = arr[d];
-        if ai >= byts.len() {
+        if ai >= node.len() {
             if rnd[d] >= 2 || fword[d] == uword[d] {
                 depth -= 1;
             }
             continue;
         }
 
-        let len = byts[ai] as usize;
+        let len = node[ai] as usize;
         let base = ai + 1;
 
         // Skip NUL entries
         let mut nul_count = 0;
-        while nul_count < len && base + nul_count < byts.len() && byts[base + nul_count] == 0 {
+        while nul_count < len && base + nul_count < node.len() && node[base + nul_count] == 0 {
             nul_count += 1;
         }
 
@@ -289,17 +289,17 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
 
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if mid >= byts.len() {
+            if mid >= node.len() {
                 break;
             }
-            if byts[mid] == c {
+            if node[mid] == c {
                 kword[d] = c;
-                arr[d + 1] = idxs[mid] as usize;
+                arr[d + 1] = meta[mid] as usize;
                 rnd[d + 1] = 0;
                 depth += 1;
                 found = true;
                 break;
-            } else if byts[mid] < c {
+            } else if node[mid] < c {
                 lo = mid + 1;
             } else {
                 hi = mid;

@@ -230,39 +230,39 @@ fn build_prefix_dict() -> Dictionary {
     // The trie for "happy": root -> h -> a -> p -> p -> y -> [end with flags]
     //
     // Trie layout: each node starts with a sibling count byte, then sibling entries.
-    // A sibling with byte 0 and flags in idxs is an end-of-word marker.
-    // A sibling with byte > 3 and child index in idxs is a character node.
+    // A sibling with byte 0 and flags in meta is an end-of-word marker.
+    // A sibling with byte > 3 and child index in meta is a character node.
     //
     // We encode: h-a-p-p-y with flags at the leaf.
     let word_flags: u32 = (WF_AFX as u32) | (5u32 << 24);
 
     // Node layout for "happy":
     // [0] = 1 (1 sibling: 'h')
-    // [1] = 'h', idxs[1] = 2 (child at index 2)
+    // [1] = 'h', meta[1] = 2 (child at index 2)
     // [2] = 1 (1 sibling: 'a')
-    // [3] = 'a', idxs[3] = 4
+    // [3] = 'a', meta[3] = 4
     // [4] = 1 (1 sibling: 'p')
-    // [5] = 'p', idxs[5] = 6
+    // [5] = 'p', meta[5] = 6
     // [6] = 1 (1 sibling: 'p')
-    // [7] = 'p', idxs[7] = 8
+    // [7] = 'p', meta[7] = 8
     // [8] = 1 (1 sibling: 'y')
-    // [9] = 'y', idxs[9] = 10
+    // [9] = 'y', meta[9] = 10
     // [10] = 1 (1 sibling: end-of-word marker)
-    // [11] = 0 (end marker), idxs[11] = word_flags
+    // [11] = 0 (end marker), meta[11] = word_flags
     let foldtree = WordTree {
         node: vec![1, b'h', 1, b'a', 1, b'p', 1, b'p', 1, b'y', 1, 0],
         meta: vec![0, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, word_flags],
     };
 
     // Build prefix tree containing "un" with affix_id=5, condnr=0, pflags=0
-    // idxs value = (pflags << 24) | (condnr << 8) | affix_id = 0 | 0 | 5 = 5
+    // meta value = (pflags << 24) | (condnr << 8) | affix_id = 0 | 0 | 5 = 5
     // Node layout for "un":
     // [0] = 1 (1 sibling: 'u')
-    // [1] = 'u', idxs[1] = 2
+    // [1] = 'u', meta[1] = 2
     // [2] = 1 (1 sibling: 'n')
-    // [3] = 'n', idxs[3] = 4
+    // [3] = 'n', meta[3] = 4
     // [4] = 1 (1 sibling: end-of-prefix marker)
-    // [5] = 0 (end marker), idxs[5] = 5 (affix_id=5, condnr=0, pflags=0)
+    // [5] = 0 (end marker), meta[5] = 5 (affix_id=5, condnr=0, pflags=0)
     let prefix_pidx: u32 = 5; // affix_id=5
     let prefixtree = WordTree {
         node: vec![1, b'u', 1, b'n', 1, 0],

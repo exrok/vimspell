@@ -1616,15 +1616,15 @@ impl Dictionary {
             return 0;
         }
 
-        let byts = &tree.node;
-        let idxs = &tree.meta;
+        let node = &tree.node;
+        let meta = &tree.meta;
 
         let mut result_count = 0usize;
         let mut arridx = 0usize;
         let mut wlen = 0usize;
 
-        while arridx < byts.len() {
-            let Some(&sibling_count_byte) = byts.get(arridx) else {
+        while arridx < node.len() {
+            let Some(&sibling_count_byte) = node.get(arridx) else {
                 break;
             };
             let sibling_count = sibling_count_byte as usize;
@@ -1634,14 +1634,14 @@ impl Dictionary {
 
             let mut zero_count = 0;
             while zero_count < sibling_count {
-                let Some(&b) = byts.get(arridx + zero_count) else {
+                let Some(&b) = node.get(arridx + zero_count) else {
                     break;
                 };
                 if b != 0 {
                     break;
                 }
                 if wlen == word.len()
-                    && let Some(&flags) = idxs.get(arridx + zero_count)
+                    && let Some(&flags) = meta.get(arridx + zero_count)
                     && result_count < out.len()
                 {
                     out[result_count] = flags;
@@ -1668,7 +1668,7 @@ impl Dictionary {
 
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                let Some(&mid_byte) = byts.get(mid) else {
+                let Some(&mid_byte) = node.get(mid) else {
                     break;
                 };
 
@@ -1686,7 +1686,7 @@ impl Dictionary {
                 return result_count;
             };
 
-            let Some(&next_idx) = idxs.get(match_idx) else {
+            let Some(&next_idx) = meta.get(match_idx) else {
                 break;
             };
             let next_idx = next_idx as usize;
@@ -1706,26 +1706,26 @@ impl Dictionary {
             return WordResult::NotFound;
         }
 
-        let byts = &self.prefixtree.node;
-        let idxs = &self.prefixtree.meta;
+        let node = &self.prefixtree.node;
+        let meta = &self.prefixtree.meta;
 
         let mut arridx = 0usize;
         let mut wlen = 0usize;
 
         loop {
-            let Some(&len_byte) = byts.get(arridx) else {
+            let Some(&len_byte) = node.get(arridx) else {
                 break;
             };
             let mut len = len_byte as usize;
             arridx += 1;
 
-            if let Some(&b) = byts.get(arridx)
+            if let Some(&b) = node.get(arridx)
                 && b == 0
             {
                 let pref_arridx = arridx;
                 let mut pref_count = 0usize;
                 while pref_count < len {
-                    let Some(&pb) = byts.get(arridx + pref_count) else {
+                    let Some(&pb) = node.get(arridx + pref_count) else {
                         break;
                     };
                     if pb != 0 {
@@ -1762,11 +1762,11 @@ impl Dictionary {
 
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                let Some(&mid_byte) = byts.get(mid) else {
+                let Some(&mid_byte) = node.get(mid) else {
                     break;
                 };
                 if mid_byte == search_byte {
-                    let next = idxs[mid] as usize;
+                    let next = meta[mid] as usize;
                     if next == 0 {
                         return WordResult::NotFound;
                     }
@@ -1897,20 +1897,20 @@ impl Dictionary {
     ) where
         F: FnMut(&[u8], u32),
     {
-        let byts = &tree.node;
-        let idxs = &tree.meta;
+        let node = &tree.node;
+        let meta = &tree.meta;
 
-        let Some(&sibling_count) = byts.get(arridx) else {
+        let Some(&sibling_count) = node.get(arridx) else {
             return;
         };
         let sibling_count = sibling_count as usize;
 
         for i in 0..sibling_count {
             let idx = arridx + 1 + i;
-            let Some(&b) = byts.get(idx) else {
+            let Some(&b) = node.get(idx) else {
                 continue;
             };
-            let Some(&flags_or_idx) = idxs.get(idx) else {
+            let Some(&flags_or_idx) = meta.get(idx) else {
                 continue;
             };
 
@@ -1922,7 +1922,7 @@ impl Dictionary {
             } else if depth < word_buf.len() {
                 word_buf[depth] = b;
                 let child_idx = flags_or_idx as usize;
-                if child_idx > 0 && child_idx < byts.len() {
+                if child_idx > 0 && child_idx < node.len() {
                     self.iter_tree_node(tree, child_idx, word_buf, depth + 1, callback);
                 }
             }
