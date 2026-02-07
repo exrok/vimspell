@@ -1,9 +1,30 @@
+mod trace;
+pub use trace::Trace;
+pub(crate) use trace::{enable_trace, take_trace};
+
 use super::*;
 use hashbrown::HashMap;
+use jsony::Jsony;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+macro_rules! trace {
+    (init $depth:expr, $fword:expr, $score:expr) => {
+        trace::with_trace(|t| t.init($depth, $fword, $score))
+    };
+    (go_deeper $depth:expr, $fword:expr, $child_score:expr) => {
+        trace::with_trace(|t| t.go_deeper($depth, $fword, $child_score))
+    };
+    (enter_state $depth:expr, $state:expr) => {
+        trace::with_trace(|t| t.enter_state($depth, $state))
+    };
+    (suggest $depth:expr, $word:expr, $score:expr) => {
+        trace::with_trace(|t| t.suggest($depth, $word, $score))
+    };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Jsony)]
 #[repr(u8)]
-enum State {
+#[jsony(Binary)]
+pub enum State {
     Start,
     Plain,
     InsPrep,
@@ -63,7 +84,7 @@ impl Default for TryState {
 /// SAFETY: depth must be < MAXWLEN - 1 (checked by can_go_deeper before every call).
 #[inline(always)]
 fn go_deeper(stack: &mut [TryState; MAXWLEN_EXT], depth: u8, score_add: i32) {
-    debug_assert!(depth + 1 < MAXWLEN_EXT as u8);
+    debug_assert!(depth as usize + 1 < MAXWLEN_EXT as usize);
     let parent = stack[depth as usize];
     let child = &mut stack[(depth + 1) as usize];
     *child = parent;
@@ -347,8 +368,10 @@ pub(crate) fn suggest_trie_walk(
     //   trie node's allocated range in byts/idxs.
     // - `fidx` is bounded by depth + fword_len, always < 255.
     let mut state = State::Start;
+    trace!(init 0, &fword.0, 0);
     loop {
         let d = depth as usize;
+        trace!(enter_state depth, state);
         match state {
             State::Start => {
                 let arridx = stack[d].arridx as usize;
@@ -446,6 +469,7 @@ pub(crate) fn suggest_trie_walk(
 
                     if total < maxscore {
                         add_suggestion(scored, &word, total);
+                        trace!(suggest depth, &word, total);
 
                         if scored.len() > SUG_MAX_COUNT {
                             maxscore = cleanup_suggestions(scored, maxscore);
@@ -467,6 +491,7 @@ pub(crate) fn suggest_trie_walk(
                         let prev_fidx = stack[d].fidx;
                         stack[d].state = state;
                         go_deeper(&mut stack, depth, extra);
+                        trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                         depth += 1;
                         state = State::Start;
                         let sd = depth as usize;
@@ -500,6 +525,7 @@ pub(crate) fn suggest_trie_walk(
                             if can_go_deeper(&mut stack, depth, newscore, maxscore) {
                                 stack[d].state = state;
                                 go_deeper(&mut stack, depth, newscore);
+                                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                                 depth += 1;
                                 state = State::Start;
                                 let sd = depth as usize;
@@ -544,6 +570,7 @@ pub(crate) fn suggest_trie_walk(
                 if can_go_deeper(&mut stack, depth, newscore, maxscore) {
                     stack[d].state = state;
                     go_deeper(&mut stack, depth, newscore);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     let sd = depth as usize;
@@ -623,6 +650,7 @@ pub(crate) fn suggest_trie_walk(
                 if can_go_deeper(&mut stack, depth, SCORE_INS, maxscore) {
                     stack[d].state = state;
                     go_deeper(&mut stack, depth, SCORE_INS);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     let sd = depth as usize;
@@ -659,6 +687,7 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 1] = c1;
                     let prev_fidx = stack[d].fidx;
                     go_deeper(&mut stack, depth, SCORE_SWAP);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     stack[depth as usize].fidxtry = prev_fidx + 2;
@@ -698,6 +727,7 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 2] = c1;
                     let prev_fidx = stack[d].fidx;
                     go_deeper(&mut stack, depth, SCORE_SWAP3);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     stack[depth as usize].fidxtry = prev_fidx + 3;
@@ -726,6 +756,7 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 2] = a;
                     let prev_fidx = stack[d].fidx;
                     go_deeper(&mut stack, depth, SCORE_SWAP3);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     stack[depth as usize].fidxtry = prev_fidx + 3;
@@ -754,6 +785,7 @@ pub(crate) fn suggest_trie_walk(
                     fword[fidx + 2] = b;
                     let prev_fidx = stack[d].fidx;
                     go_deeper(&mut stack, depth, SCORE_SWAP3);
+                    trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                     depth += 1;
                     state = State::Start;
                     stack[depth as usize].fidxtry = prev_fidx + 3;
@@ -853,6 +885,7 @@ pub(crate) fn suggest_trie_walk(
                 fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
 
                 go_deeper(&mut stack, depth, SCORE_REP);
+                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                 depth += 1;
                 state = State::Start;
                 stack[depth as usize].fidxtry = (fidx + to_len) as u8;
@@ -961,6 +994,7 @@ pub(crate) fn suggest_trie_walk(
                 fword.0[fidx..fidx + to_len].copy_from_slice(to_bytes);
 
                 go_deeper(&mut stack, depth, SCORE_REP);
+                trace!(go_deeper depth, &fword.0, stack[(depth + 1) as usize].score);
                 depth += 1;
                 state = State::Start;
                 stack[depth as usize].fidxtry = (fidx + to_len) as u8;

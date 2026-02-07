@@ -11,3 +11,4 @@ hashbrown = { version = "0.16.1", default-features = false, features = [
     "inline-more",
     "default-hasher",
 ] }
+jsony = "0.1.8"

@@ -62,6 +62,7 @@ use std::hash::BuildHasher;
 use hashbrown::{HashMap, HashTable, hash_table::Entry};
 
 use crate::suggest::FWord;
+pub use crate::suggest::Trace;
 #[cfg(test)]
 mod nvim_compare_test;
 mod parser;
@@ -76,7 +77,7 @@ const VIMSPELLVERSION: u8 = 50;
 /// Maximum word length in bytes. Matches neovim's MAXWLEN.
 const MAXWLEN: usize = 254;
 /// Maximum world extended to u8::MAX, as an optimization
-const MAXWLEN_EXT: usize = 255;
+const MAXWLEN_EXT: usize = 256;
 
 const SN_REGION: u8 = 0;
 const SN_CHARFLAGS: u8 = 1;
@@ -1137,15 +1138,8 @@ impl Dictionary {
         }
     }
 
-    /// Gets spelling suggestions for a misspelled word.
-    ///
-    /// Returns up to 25 suggestions ranked by similarity (edit distance, phonetic similarity, etc.).
-    pub fn suggestions(&self, word: &[u8]) -> Vec<Vec<u8>> {
-        if word.is_empty() || word.len() > MAXWLEN {
-            return Vec::new();
-        }
-
-        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
+    fn suggest_core(&self, word: &[u8]) -> HashMap<Vec<u8>, i32> {
+        let mut scored = HashMap::new();
         let word_len = word.len();
 
         let mut fword = FWord([0u8; MAXWLEN_EXT]);
@@ -1164,47 +1158,54 @@ impl Dictionary {
             badflags,
         );
 
-        // Add user dictionary words as candidates
         self.add_user_words_to_suggestions(word, &mut scored, SCORE_MAXINIT);
+        scored
+    }
 
-        let mut results = self.rescore_and_sort(scored, word, word_len);
-        results.truncate(25);
+    /// Gets up to `max_count` spelling suggestions for a misspelled word.
+    pub fn suggestions_n(&self, word: &[u8], max_count: usize) -> Vec<Vec<u8>> {
+        if word.is_empty() || word.len() > MAXWLEN {
+            return Vec::new();
+        }
+        let scored = self.suggest_core(word);
+        let mut results = self.rescore_and_sort(scored, word, word.len());
+        results.truncate(max_count);
         results.into_iter().map(|(w, _)| w).collect()
+    }
+
+    /// Gets up to `max_count` spelling suggestions with scores.
+    pub fn suggestions_scored_n(&self, word: &[u8], max_count: usize) -> Vec<(Vec<u8>, i32)> {
+        if word.is_empty() || word.len() > MAXWLEN {
+            return Vec::new();
+        }
+        let scored = self.suggest_core(word);
+        let mut results = self.rescore_and_sort(scored, word, word.len());
+        results.truncate(max_count);
+        results
+    }
+
+    /// Gets spelling suggestions for a misspelled word.
+    ///
+    /// Returns up to 25 suggestions ranked by similarity (edit distance, phonetic similarity, etc.).
+    pub fn suggestions(&self, word: &[u8]) -> Vec<Vec<u8>> {
+        self.suggestions_n(word, 25)
     }
 
     /// Gets spelling suggestions with their scores for a misspelled word.
     ///
     /// Returns up to 25 `(word, score)` pairs sorted by score (lower is better).
     pub fn suggestions_scored(&self, word: &[u8]) -> Vec<(Vec<u8>, i32)> {
-        if word.is_empty() || word.len() > MAXWLEN {
-            return Vec::new();
-        }
+        self.suggestions_scored_n(word, 25)
+    }
 
-        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
-        let word_len = word.len();
-
-        let mut fword = FWord([0u8; MAXWLEN_EXT]);
-        for (i, &b) in word.iter().enumerate() {
-            fword[i as u8] = self.charflags.fold(b);
-        }
-
-        let badflags = captype(word, &self.charflags);
-
-        suggest::suggest_trie_walk(
-            self,
-            &mut fword,
-            word_len as u8,
-            &mut scored,
-            SCORE_MAXINIT,
-            badflags,
-        );
-
-        // Add user dictionary words as candidates
-        self.add_user_words_to_suggestions(word, &mut scored, SCORE_MAXINIT);
-
-        let mut results = self.rescore_and_sort(scored, word, word_len);
-        results.truncate(25);
-        results
+    /// Gets spelling suggestions along with a detailed trace of the trie walk.
+    ///
+    /// Traces the full IDDFS path so the trace reflects actual search behavior.
+    pub fn suggestions_traced(&self, word: &[u8]) -> (Vec<Vec<u8>>, suggest::Trace) {
+        suggest::enable_trace();
+        let suggestions = self.suggestions(word);
+        let trace = suggest::take_trace().unwrap();
+        (suggestions, trace)
     }
 
     /// Rescore suggestions using SAL sound similarity and sort by

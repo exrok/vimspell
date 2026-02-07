@@ -9,8 +9,12 @@ fn main() {
         "compound-words" => dump_compound_words(),
         "check" => spell_check(),
         "profile" => profile_suggestions(),
+        "trace" => {
+            let word = args.get(2).map(|s| s.as_str()).unwrap_or("accomodation");
+            trace_suggestions(word);
+        }
         _ => {
-            eprintln!("Usage: vim-spell [compound-info|compound-words|check|profile]");
+            eprintln!("Usage: vim-spell [compound-words|check|profile|trace <word>]");
             std::process::exit(1);
         }
     }
@@ -61,6 +65,19 @@ fn profile_suggestions() {
         for &typo_word in typos {
             std::hint::black_box(dict.suggestions(typo_word));
         }
+    }
+}
+
+fn trace_suggestions(word: &str) {
+    let dict = load_dict();
+    let (suggestions, trace) = dict.suggestions_traced(word.as_bytes());
+
+    println!("=== Trace for '{}' ===\n", word);
+    println!("{}", trace);
+
+    println!("Top suggestions:");
+    for s in suggestions.iter().take(10) {
+        println!("  {}", String::from_utf8_lossy(s));
     }
 }
 
