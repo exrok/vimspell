@@ -17,7 +17,7 @@ fn main() {
 }
 
 fn load_dict() -> Dictionary {
-    let contents = std::fs::read("/code/vim-spell/en.utf-8.spl").expect("Failed to read file");
+    let contents = std::fs::read("/code/vimspell/dicts/en.utf-8.spl").expect("Failed to read file");
     Dictionary::parse(&contents).expect("Failed to parse dictionary")
 }
 

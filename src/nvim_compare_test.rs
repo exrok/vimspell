@@ -188,8 +188,30 @@ static NEOVIM_RESULTS: [NvimResult; 18] = [
 use super::*;
 use std::collections::HashSet;
 
+/// Recursively search up from CARGO_MANIFEST_DIR to find dicts/ directory
+fn find_dict_file(filename: &str) -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    loop {
+        let candidate = dir.join("dicts").join(filename);
+        if candidate.exists() {
+            return candidate;
+        }
+
+        if !dir.pop() {
+            panic!(
+                "Could not find dicts/{} by searching up from CARGO_MANIFEST_DIR ({})",
+                filename,
+                env!("CARGO_MANIFEST_DIR")
+            );
+        }
+    }
+}
+
 fn load_dict() -> Dictionary {
-    let contents = std::fs::read("/code/vim-spell/en.utf-8.spl").expect("should read file");
+    let dict_path = find_dict_file("en.utf-8.spl");
+    let contents = std::fs::read(&dict_path)
+        .unwrap_or_else(|e| panic!("Failed to read {:?}: {}", dict_path, e));
     Dictionary::parse(&contents).expect("should parse dictionary")
 }
 

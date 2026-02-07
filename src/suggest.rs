@@ -1,31 +1,5 @@
+use super::*;
 use hashbrown::HashMap;
-
-use crate::MAXWLEN_EXT;
-
-use super::Dictionary;
-use super::MAXWLEN;
-use super::SCORE_DEL;
-use super::SCORE_DELDUP;
-use super::SCORE_ICASE;
-use super::SCORE_INS;
-use super::SCORE_INSDUP;
-use super::SCORE_RARE;
-use super::SCORE_REGION;
-use super::SCORE_REP;
-use super::SCORE_SIMILAR;
-use super::SCORE_SPLIT;
-use super::SCORE_SUBST;
-use super::SCORE_SWAP;
-use super::SCORE_SWAP3;
-use super::WF_ALLCAP;
-use super::WF_BANNED;
-use super::WF_KEEPCAP;
-use super::WF_NEEDCOMP;
-use super::WF_NOSUGGEST;
-use super::WF_ONECAP;
-use super::WF_RARE;
-use super::WF_REGION;
-use super::WordTree;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

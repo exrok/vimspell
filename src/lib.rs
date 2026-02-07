@@ -533,15 +533,6 @@ impl Bytes {
     }
 }
 
-fn fnv1a(data: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811c9dc5;
-    for &b in data {
-        hash ^= b as u32;
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
-}
-
 #[derive(Clone, Copy, Default)]
 struct CommonWordEntry {
     word: Bytes,
@@ -549,15 +540,15 @@ struct CommonWordEntry {
 }
 
 struct CommonWords {
-    entries: Vec<CommonWordEntry>,
-    mask: u32,
+    entries: HashTable<CommonWordEntry>,
+    hasher: hashbrown::DefaultHashBuilder,
 }
 
 impl CommonWords {
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            mask: 0,
+            entries: HashTable::new(),
+            hasher: hashbrown::DefaultHashBuilder::default(),
         }
     }
 
@@ -566,53 +557,35 @@ impl CommonWords {
     }
 
     fn with_capacity(cap: usize) -> Self {
-        if cap == 0 {
-            return Self::new();
-        }
-        let table_size = (cap * 2).next_power_of_two();
         Self {
-            entries: vec![CommonWordEntry::default(); table_size],
-            mask: (table_size - 1) as u32,
+            entries: HashTable::with_capacity(cap),
+            hasher: hashbrown::DefaultHashBuilder::default(),
         }
     }
 
     fn lookup(&self, arena: &Arena, word: &[u8]) -> u16 {
-        if self.entries.is_empty() {
-            return 0;
-        }
-        let hash = fnv1a(word);
-        let mut idx = (hash & self.mask) as usize;
-        loop {
-            let entry = self.entries[idx];
-            if entry.word.is_empty() {
-                return 0;
-            }
-            if arena[entry.word] == *word {
-                return entry.count;
-            }
-            idx = (idx + 1) & self.mask as usize;
-        }
+        let hash = self.hasher.hash_one(word);
+        self.entries
+            .find(hash, |entry| &arena[entry.word] == word)
+            .map(|entry| entry.count)
+            .unwrap_or(0)
     }
 
     fn insert(&mut self, arena: &Arena, word: Bytes, count: u16) {
-        if self.entries.is_empty() {
-            return;
-        }
         let key = &arena[word];
-        let hash = fnv1a(key);
-        let mut idx = (hash & self.mask) as usize;
-        loop {
-            let entry = &mut self.entries[idx];
-            if entry.word.is_empty() {
-                entry.word = word;
-                entry.count = count;
-                return;
+        let hash = self.hasher.hash_one(key);
+
+        match self.entries.entry(
+            hash,
+            |entry| &arena[entry.word] == key,
+            |entry| self.hasher.hash_one(&arena[entry.word]),
+        ) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().count = entry.get().count.saturating_add(count);
             }
-            if arena[entry.word] == *key {
-                entry.count = entry.count.saturating_add(count);
-                return;
+            Entry::Vacant(entry) => {
+                entry.insert(CommonWordEntry { word, count });
             }
-            idx = (idx + 1) & self.mask as usize;
         }
     }
 }
