@@ -6,7 +6,6 @@ fn main() {
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("check");
 
     match command {
-        "compound-info" => show_compound_info(),
         "compound-words" => dump_compound_words(),
         "check" => spell_check(),
         "profile" => profile_suggestions(),
@@ -20,31 +19,6 @@ fn main() {
 fn load_dict() -> Dictionary {
     let contents = std::fs::read("/code/vim-spell/en.utf-8.spl").expect("Failed to read file");
     Dictionary::parse(&contents).expect("Failed to parse dictionary")
-}
-
-fn show_compound_info() {
-    let dict = load_dict();
-    let info = dict.compound_info();
-    println!("Compound word support: {}", dict.has_compound_rules());
-    println!("Max words in compound: {}", info.max_words);
-    println!("Min part length: {}", info.min_part_len);
-    println!("Max syllables: {}", info.max_syllables);
-    println!("Number of rules: {}", info.rules_count);
-    println!("Number of patterns: {}", info.patterns_count);
-    println!(
-        "Start flags: {:?}",
-        info.start_flags
-            .iter()
-            .map(|&b| char::from(b))
-            .collect::<Vec<_>>()
-    );
-    println!(
-        "All flags: {:?}",
-        info.all_flags
-            .iter()
-            .map(|&b| char::from(b))
-            .collect::<Vec<_>>()
-    );
 }
 
 fn dump_compound_words() {
@@ -85,11 +59,7 @@ fn profile_suggestions() {
 
     for _ in 0..20 {
         for &typo_word in typos {
-            let t = vim_spell::Typo {
-                start: 0,
-                end: typo_word.len() as u32,
-            };
-            std::hint::black_box(dict.suggestions(&t, typo_word));
+            std::hint::black_box(dict.suggestions(typo_word));
         }
     }
 }
@@ -98,16 +68,16 @@ fn spell_check() {
     let dict = load_dict();
     let input = b"This is a sampl text with an accomodation typo.";
 
-    for typo in dict.spell_check(input) {
-        let word = typo.word(input);
+    for range in dict.spell_check(input) {
+        let word = &input[range.clone()];
         println!(
             "Typo found: '{}' at positions {}-{}",
             word.escape_ascii(),
-            typo.start,
-            typo.end
+            range.start,
+            range.end
         );
         println!("Suggestions:");
-        for suggestion in dict.suggestions(&typo, input) {
+        for suggestion in dict.suggestions(word) {
             println!(" - {}", suggestion.escape_ascii());
         }
     }

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 //! # vim-spell: High performance spell-check with vim's spl dictionary support.
 
-use hashbrown::HashMap;
+use std::hash::BuildHasher;
+
+use hashbrown::{HashMap, HashTable, hash_table::Entry};
 
 use crate::suggest::FWord;
 #[cfg(test)]
@@ -61,6 +63,8 @@ const SCORE_COMMON2: i32 = 40;
 const SCORE_COMMON3: i32 = 50;
 const SCORE_THRES2: u16 = 10;
 const SCORE_THRES3: u16 = 100;
+
+const SCORE_EDIT_MIN: i32 = SCORE_SIMILAR;
 
 const REGION_ALL: u8 = 0xff;
 
@@ -590,6 +594,10 @@ struct SalInfo {
 /// A loaded spell dictionary.
 pub struct Dictionary {
     pub(crate) arena: Arena,
+    hasher: hashbrown::DefaultHashBuilder,
+    user_good_words: HashTable<Bytes>,
+    user_banned_words: HashTable<Bytes>,
+
     pub(crate) foldtree: WordTree,
     keeptree: WordTree,
     prefixtree: WordTree,
@@ -614,26 +622,6 @@ pub struct Dictionary {
     pub(crate) repsal: Vec<RepItem>,
     pub(crate) repsal_first: [i16; 256],
     pub(crate) common_words: CommonWords,
-}
-
-/// A detected typo with position information.
-///
-/// Contains byte offsets into the original input text. Use `word()` with the
-/// original input to retrieve the misspelled word.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Typo {
-    /// Byte offset of the start of the misspelled word.
-    pub start: u32,
-    /// Byte offset of the end of the misspelled word (exclusive).
-    pub end: u32,
-}
-
-impl Typo {
-    /// Returns the misspelled word as a byte slice from the input text.
-    #[inline]
-    pub fn word<'a>(&self, input: &'a [u8]) -> &'a [u8] {
-        &input[self.start as usize..self.end as usize]
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -693,8 +681,14 @@ impl Dictionary {
     pub fn parse(content: &[u8]) -> Result<Self, ParseError> {
         parser::parse(content)
     }
-    /// Check text for spelling errors, returning an iterator of typos.
-    pub fn spell_check<'a>(&'a self, input: &'a [u8]) -> impl Iterator<Item = Typo> + 'a {
+    /// Check text for spelling errors, returning an iterator of byte ranges.
+    ///
+    /// Each range represents the byte offsets (start..end) of a misspelled word
+    /// in the input text.
+    pub fn spell_check<'a>(
+        &'a self,
+        input: &'a [u8],
+    ) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
         SpellCheckIter::new(self, input)
     }
 
@@ -712,7 +706,7 @@ impl Dictionary {
     /// Words marked as region-specific will only be accepted if they
     /// match this region. Pass a 2-byte region code (e.g., `b"us"`).
     /// If the region is not found in the dictionary, the region is set
-    /// to [`REGION_ALL`] (accept all regions).
+    /// to (accept all regions).
     ///
     /// Returns false, if region was unknown
     pub fn set_region(&mut self, region: &[u8; 2]) -> bool {
@@ -729,6 +723,70 @@ impl Dictionary {
     /// Clear the active region, accepting words from all regions.
     pub fn clear_region(&mut self) {
         self.region = REGION_ALL;
+    }
+
+    /// Adds a word to the user dictionary as correct.
+    ///
+    /// The word will be accepted during spell checking even if it's not in
+    /// the main dictionary. If the word was previously marked as banned, it
+    /// will be removed from the banned list.
+    pub fn add_good_word(&mut self, word: &[u8]) {
+        let _ = self
+            .user_banned_words
+            .find_entry(self.hasher.hash_one(word), |bytes| {
+                &self.arena[*bytes] == word
+            })
+            .map(|entry| entry.remove());
+
+        if let Entry::Vacant(entry) = self.user_good_words.entry(
+            self.hasher.hash_one(word),
+            |bytes| &self.arena[*bytes] == word,
+            |item| self.hasher.hash_one(&self.arena[*item]),
+        ) {
+            entry.insert(self.arena.alloc(word));
+        }
+    }
+
+    /// Marks a word as banned (incorrect).
+    ///
+    /// The word will be flagged as a spelling error even if it exists in the
+    /// main dictionary. If the word was previously marked as good, it will be
+    /// removed from the good list.
+    pub fn ban_word(&mut self, word: &[u8]) {
+        let _ = self
+            .user_good_words
+            .find_entry(self.hasher.hash_one(word), |bytes| {
+                &self.arena[*bytes] == word
+            })
+            .map(|entry| entry.remove());
+
+        if let Entry::Vacant(entry) = self.user_banned_words.entry(
+            self.hasher.hash_one(word),
+            |bytes| &self.arena[*bytes] == word,
+            |item| self.hasher.hash_one(&self.arena[*item]),
+        ) {
+            entry.insert(self.arena.alloc(word));
+        }
+    }
+
+    /// Removes a word from the user dictionary.
+    ///
+    /// Removes the word from both the good and banned lists, returning spell
+    /// checking to the main dictionary's behavior.
+    pub fn remove_user_word(&mut self, word: &[u8]) {
+        let _ = self
+            .user_good_words
+            .find_entry(self.hasher.hash_one(word), |bytes| {
+                &self.arena[*bytes] == word
+            })
+            .map(|entry| entry.remove());
+
+        let _ = self
+            .user_banned_words
+            .find_entry(self.hasher.hash_one(word), |bytes| {
+                &self.arena[*bytes] == word
+            })
+            .map(|entry| entry.remove());
     }
 
     pub fn has_sal(&self) -> bool {
@@ -768,12 +826,218 @@ impl Dictionary {
         soundfold::soundfold_wsal(sal, word, &self.charflags)
     }
 
-    /// Get spelling suggestions for a typo.
+    /// Checks if two characters are similar according to the MAP section.
+    fn similar_chars(&self, c1: u8, c2: u8) -> bool {
+        if let Some(ref map) = self.map {
+            let m1 = map.map_array[c1 as usize];
+            let m2 = map.map_array[c2 as usize];
+            m1 != 0 && m1 == m2
+        } else {
+            false
+        }
+    }
+
+    /// Calculates edit distance score between two words with a score limit.
     ///
-    /// Takes the original input text to extract the misspelled word. This allows
-    /// for context-aware suggestions in the future.
-    pub fn suggestions(&self, typo: &Typo, input: &[u8]) -> Vec<Vec<u8>> {
-        let word = typo.word(input);
+    /// Returns a score similar to Neovim's suggestion scoring where lower is
+    /// better. Uses a stack-based algorithm that explores edit paths and
+    /// prunes when the score exceeds the limit. This is much faster than
+    /// computing the full edit distance for words that are very different.
+    ///
+    /// Returns SCORE_MAXMAX if the score exceeds the limit.
+    fn edit_distance_score(&self, badword: &[u8], goodword: &[u8], limit: i32) -> i32 {
+        #[derive(Copy, Clone)]
+        struct StackItem {
+            badi: usize,
+            goodi: usize,
+            score: i32,
+        }
+
+        let badlen = badword.len();
+        let goodlen = goodword.len();
+
+        // Quick check: if length difference alone exceeds limit, bail out
+        let len_diff = (badlen as i32 - goodlen as i32).abs();
+        let min_score = len_diff * SCORE_DEL.min(SCORE_INS);
+        if min_score > limit {
+            return SCORE_MAXMAX;
+        }
+
+        // Stack for exploring alternative edit paths
+        let mut stack = [StackItem {
+            badi: 0,
+            goodi: 0,
+            score: 0,
+        }; 10];
+        let mut stackidx = 0;
+
+        let mut bi = 0;
+        let mut gi = 0;
+        let mut score = 0;
+        let mut minscore = limit + 1;
+
+        loop {
+            // Skip over matching characters
+            while bi < badlen && gi < goodlen {
+                let bc = badword[bi];
+                let gc = goodword[gi];
+
+                if bc != gc {
+                    break;
+                }
+
+                bi += 1;
+                gi += 1;
+            }
+
+            // Check if we reached the end of both words
+            if bi == badlen && gi == goodlen {
+                if score < minscore {
+                    minscore = score;
+                }
+            } else if gi == goodlen {
+                // goodword ends, delete remaining badword chars
+                let mut del_score = score;
+                for _ in bi..badlen {
+                    del_score += SCORE_DEL;
+                    if del_score >= minscore {
+                        break;
+                    }
+                }
+                if del_score < minscore {
+                    minscore = del_score;
+                }
+            } else if bi == badlen {
+                // badword ends, insert remaining goodword chars
+                let mut ins_score = score;
+                for _ in gi..goodlen {
+                    ins_score += SCORE_INS;
+                    if ins_score >= minscore {
+                        break;
+                    }
+                }
+                if ins_score < minscore {
+                    minscore = ins_score;
+                }
+            } else {
+                // Both words continue - try different edit operations
+                let bc = badword[bi];
+                let gc = goodword[gi];
+
+                // Try delete and insert operations by pushing to stack
+                for round in 0..2 {
+                    let score_off = score + if round == 0 { SCORE_DEL } else { SCORE_INS };
+                    if score_off < minscore {
+                        if score_off + SCORE_EDIT_MIN >= minscore {
+                            // Near the limit - check if rest must match exactly
+                            let mut bi2 = if round == 0 { bi + 1 } else { bi };
+                            let mut gi2 = if round == 0 { gi } else { gi + 1 };
+                            let mut exact_match = true;
+                            while bi2 < badlen && gi2 < goodlen {
+                                if badword[bi2] != goodword[gi2] {
+                                    exact_match = false;
+                                    break;
+                                }
+                                bi2 += 1;
+                                gi2 += 1;
+                            }
+                            if exact_match
+                                && bi2 == badlen
+                                && gi2 == goodlen
+                                && score_off < minscore
+                            {
+                                minscore = score_off;
+                            }
+                        } else if stackidx < stack.len() {
+                            // Push to stack for later exploration
+                            stack[stackidx] = StackItem {
+                                badi: if round == 0 { bi + 1 } else { bi },
+                                goodi: if round == 0 { gi } else { gi + 1 },
+                                score: score_off,
+                            };
+                            stackidx += 1;
+                        }
+                    }
+                }
+
+                // Check for swap
+                if score + SCORE_SWAP < minscore
+                    && bi + 1 < badlen
+                    && gi + 1 < goodlen
+                    && gc == badword[bi + 1]
+                    && bc == goodword[gi + 1]
+                {
+                    // Swap detected - skip both characters
+                    bi += 2;
+                    gi += 2;
+                    score += SCORE_SWAP;
+                    continue;
+                }
+
+                // Substitute
+                let fc1 = self.charflags.fold(bc);
+                let fc2 = self.charflags.fold(gc);
+
+                let subst_cost = if fc1 == fc2 {
+                    SCORE_ICASE
+                } else if self.similar_chars(bc, gc) {
+                    SCORE_SIMILAR
+                } else {
+                    SCORE_SUBST
+                };
+
+                score += subst_cost;
+
+                if score < minscore {
+                    bi += 1;
+                    gi += 1;
+                    continue;
+                }
+            }
+
+            // Pop from stack to try next alternative
+            if stackidx == 0 {
+                break;
+            }
+
+            stackidx -= 1;
+            let item = stack[stackidx];
+            bi = item.badi;
+            gi = item.goodi;
+            score = item.score;
+        }
+
+        if minscore > limit {
+            SCORE_MAXMAX
+        } else {
+            minscore
+        }
+    }
+
+    /// Adds user dictionary good words to the scored suggestions map.
+    fn add_user_words_to_suggestions(
+        &self,
+        typo_word: &[u8],
+        scored: &mut HashMap<Vec<u8>, i32>,
+        max_score: i32,
+    ) {
+        for good_word_bytes in self.user_good_words.iter() {
+            let good_word = &self.arena[*good_word_bytes];
+
+            // Skip if already in scored (from trie walk)
+            if scored.contains_key(good_word) {
+                continue;
+            }
+
+            let score = self.edit_distance_score(typo_word, good_word, max_score);
+            if score <= max_score {
+                scored.insert(good_word.to_vec(), score);
+            }
+        }
+    }
+
+    /// Get spelling suggestions for a misspelled word.
+    pub fn suggestions(&self, word: &[u8]) -> Vec<Vec<u8>> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
         }
@@ -796,17 +1060,19 @@ impl Dictionary {
             SCORE_MAXINIT,
             badflags,
         );
+
+        // Add user dictionary words as candidates
+        self.add_user_words_to_suggestions(word, &mut scored, SCORE_MAXINIT);
 
         let mut results = self.rescore_and_sort(scored, word, word_len);
         results.truncate(25);
         results.into_iter().map(|(w, _)| w).collect()
     }
 
-    /// Get spelling suggestions with their scores for a typo.
+    /// Get spelling suggestions with their scores for a misspelled word.
     ///
     /// Returns `(word, score)` pairs sorted by score (lowest = best).
-    pub fn suggestions_scored(&self, typo: &Typo, input: &[u8]) -> Vec<(Vec<u8>, i32)> {
-        let word = typo.word(input);
+    pub fn suggestions_scored(&self, word: &[u8]) -> Vec<(Vec<u8>, i32)> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
         }
@@ -829,6 +1095,9 @@ impl Dictionary {
             SCORE_MAXINIT,
             badflags,
         );
+
+        // Add user dictionary words as candidates
+        self.add_user_words_to_suggestions(word, &mut scored, SCORE_MAXINIT);
 
         let mut results = self.rescore_and_sort(scored, word, word_len);
         results.truncate(25);
@@ -889,8 +1158,7 @@ impl Dictionary {
     /// Debug: get full scoring details for all candidates (pre-SAL, SAL, post-SAL).
     /// Returns (word, pre_sal_score, sal_score, final_score) sorted by final score.
     #[cfg(test)]
-    fn suggestions_debug(&self, typo: &Typo, input: &[u8]) -> Vec<(Vec<u8>, i32, i32, i32)> {
-        let word = typo.word(input);
+    fn suggestions_debug(&self, word: &[u8]) -> Vec<(Vec<u8>, i32, i32, i32)> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
         }
@@ -963,6 +1231,23 @@ impl Dictionary {
     fn check_word_internal(&self, word: &[u8]) -> WordResult {
         if word.is_empty() || word.len() > MAXWLEN {
             return WordResult::NotFound;
+        }
+
+        // Check user dictionary first (highest priority)
+        let hash = self.hasher.hash_one(word);
+        if self
+            .user_banned_words
+            .find(hash, |bytes| &self.arena[*bytes] == word)
+            .is_some()
+        {
+            return WordResult::Banned;
+        }
+        if self
+            .user_good_words
+            .find(hash, |bytes| &self.arena[*bytes] == word)
+            .is_some()
+        {
+            return WordResult::Valid;
         }
 
         let mut folded = [0u8; MAXWLEN];
@@ -1470,19 +1755,6 @@ impl Dictionary {
         !self.comp_rules.is_empty()
     }
 
-    /// Returns compound configuration information for debugging.
-    pub fn compound_info(&self) -> CompoundInfo {
-        CompoundInfo {
-            max_words: self.comp_max,
-            min_part_len: self.comp_minlen,
-            max_syllables: self.comp_sylmax,
-            rules_count: self.comp_rules.rules.len(),
-            patterns_count: self.comp_patterns.len(),
-            start_flags: self.comp_rules.start_flags.clone(),
-            all_flags: self.comp_rules.all_flags.clone(),
-        }
-    }
-
     /// Iterates over words with compound flags and calls the callback with (word, flags).
     pub fn iter_compound_words<F>(&self, mut callback: F)
     where
@@ -1625,7 +1897,7 @@ impl<'a> SpellCheckIter<'a> {
 }
 
 impl Iterator for SpellCheckIter<'_> {
-    type Item = Typo;
+    type Item = std::ops::Range<usize>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -1638,10 +1910,7 @@ impl Iterator for SpellCheckIter<'_> {
             }
 
             if !self.dict.check_word(word) {
-                return Some(Typo {
-                    start: start as u32,
-                    end: end as u32,
-                });
+                return Some(start..end);
             }
         }
     }

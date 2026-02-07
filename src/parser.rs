@@ -213,6 +213,9 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     }
 
     Ok(Dictionary {
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_banned_words: HashTable::new(),
+        user_good_words: HashTable::new(),
         arena: a,
         foldtree,
         keeptree,

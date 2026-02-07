@@ -207,15 +207,7 @@ pub fn compare() {
     let dict = load_dict();
     let rust_scored: Vec<_> = NEOVIM_RESULTS
         .iter()
-        .map(|result| {
-            dict.suggestions_scored(
-                &Typo {
-                    start: 0,
-                    end: result.typo.len() as u32,
-                },
-                result.typo.as_bytes(),
-            )
-        })
+        .map(|result| dict.suggestions_scored(result.typo.as_bytes()))
         .collect();
 
     let rust_results: Vec<Vec<&str>> = rust_scored

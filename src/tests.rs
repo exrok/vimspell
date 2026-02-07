@@ -39,7 +39,7 @@ fn test_spell_check_iter() {
     let typos: Vec<_> = dict.spell_check(input).collect();
 
     assert!(!typos.is_empty());
-    let words: Vec<_> = typos.iter().map(|t| t.word(input)).collect();
+    let words: Vec<_> = typos.iter().map(|range| &input[range.clone()]).collect();
     assert!(words.iter().any(|w| *w == b"sampl"));
 }
 
@@ -47,9 +47,8 @@ fn test_spell_check_iter() {
 fn test_suggestions() {
     let dict = load_dict();
 
-    let input = b"sampl";
-    let typo = Typo { start: 0, end: 5 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"sampl";
+    let suggestions = dict.suggestions(word);
 
     assert!(suggestions.iter().any(|s| s == b"sample"));
 }
@@ -64,7 +63,7 @@ fn test_typo_zero_copy() {
     assert_eq!(typos.len(), 1);
     assert_eq!(typos[0].start, 6);
     assert_eq!(typos[0].end, 11);
-    assert_eq!(typos[0].word(input), b"wrold");
+    assert_eq!(&input[typos[0].clone()], b"wrold");
 }
 
 #[test]
@@ -171,10 +170,9 @@ fn test_syllable_counting_space_reset() {
 #[test]
 fn test_compound_info() {
     let dict = load_dict();
-    let info = dict.compound_info();
 
-    assert_eq!(info.max_words, 254);
-    assert_eq!(info.min_part_len, 0);
+    assert_eq!(dict.comp_max, 254);
+    assert_eq!(dict.comp_minlen, 0);
 }
 
 #[test]
@@ -277,6 +275,9 @@ fn build_prefix_dict() -> Dictionary {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     }
 }
 
@@ -391,6 +392,9 @@ fn test_prefix_synthetic_with_condition() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // "unok" -> prefix "un" + "ok", "ok" starts with 'o' which is in [ao] -> valid
@@ -444,6 +448,9 @@ fn test_prefix_synthetic_rare_prefix() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // "ago" -> prefix "a" + "go", rare prefix -> ValidRare
@@ -553,9 +560,8 @@ fn test_soundalike_score_too_different() {
 fn test_suggestions_with_sal() {
     let dict = load_dict();
     // The existing "sampl" -> "sample" should still work.
-    let input = b"sampl";
-    let typo = Typo { start: 0, end: 5 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"sampl";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"sample"),
         "should suggest 'sample' for 'sampl', got {:?}",
@@ -628,11 +634,13 @@ fn test_rep_suggestions() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let input = b"fone";
-    let typo = Typo { start: 0, end: 4 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"fone";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"phone"),
         "should suggest 'phone' for 'fone' via REP rule f->ph, got {:?}",
@@ -692,11 +700,13 @@ fn test_rep_score_is_low() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let input = b"fase";
-    let typo = Typo { start: 0, end: 4 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"fase";
+    let suggestions = dict.suggestions(word);
     // "phase" should come before "phast" since "fase" -> REP "f"->"ph" -> "phase" is exact,
     // while "phast" requires both REP + substitution.
     assert!(
@@ -793,6 +803,9 @@ fn test_region_filtering_synthetic() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // With REGION_ALL (default), both words are valid.
@@ -851,6 +864,9 @@ fn test_region_wrong_region_result() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // REGION_ALL: valid
@@ -923,18 +939,20 @@ fn test_region_suggestions_penalty() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // With REGION_ALL, both should be suggested.
-    let input = b"gry";
-    let typo = Typo { start: 0, end: 3 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"gry";
+    let suggestions = dict.suggestions(word);
     assert!(suggestions.iter().any(|s| s == b"gray"));
     assert!(suggestions.iter().any(|s| s == b"grey"));
 
     // With region "us", "grey" should still appear but "gray" should rank first.
     dict.set_region(b"us");
-    let suggestions = dict.suggestions(&typo, input);
+    let suggestions = dict.suggestions(word);
     assert!(suggestions.iter().any(|s| s == b"gray"));
     assert!(suggestions.iter().any(|s| s == b"grey"));
     // "gray" should be first (no region penalty) vs "grey" (SCORE_REGION penalty).
@@ -1001,6 +1019,9 @@ fn test_map_similar_chars() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
     let m = &dict.map.as_ref().unwrap().map_array;
     // 'a' and 'e' have different group IDs, so not similar
@@ -1057,11 +1078,13 @@ fn test_map_similar_substitution_score() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words: CommonWords::new(),
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let input = b"car";
-    let typo = Typo { start: 0, end: 3 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"car";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"cat"),
         "should suggest 'cat' for 'car' when r/t are similar, got {:?}",
@@ -1154,11 +1177,13 @@ fn test_common_words_suggestion_boost() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words,
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let input = b"bxt";
-    let typo = Typo { start: 0, end: 3 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"bxt";
+    let suggestions = dict.suggestions(word);
 
     let bat_pos = suggestions.iter().position(|s| s == b"bat");
     let bet_pos = suggestions.iter().position(|s| s == b"bet");
@@ -1213,6 +1238,9 @@ fn test_score_wordcount_adj_thresholds() {
         repsal: Vec::new(),
         repsal_first: [-1; 256],
         common_words,
+        hasher: hashbrown::DefaultHashBuilder::default(),
+        user_good_words: hashbrown::HashTable::new(),
+        user_banned_words: hashbrown::HashTable::new(),
     };
 
     // count=5 < SCORE_THRES2(10): bonus = SCORE_COMMON1(30)
@@ -1232,9 +1260,8 @@ fn test_score_wordcount_adj_thresholds() {
 #[test]
 fn test_suggest_swap() {
     let dict = load_dict();
-    let input = b"hte";
-    let typo = Typo { start: 0, end: 3 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"hte";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"the"),
         "should suggest 'the' for 'hte' via swap, got {:?}",
@@ -1248,9 +1275,8 @@ fn test_suggest_swap() {
 #[test]
 fn test_suggest_multi_edit() {
     let dict = load_dict();
-    let input = b"teh";
-    let typo = Typo { start: 0, end: 3 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"teh";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"the"),
         "should suggest 'the' for 'teh' via multi-edit, got {:?}",
@@ -1264,9 +1290,8 @@ fn test_suggest_multi_edit() {
 #[test]
 fn test_suggest_word_split() {
     let dict = load_dict();
-    let input = b"inthe";
-    let typo = Typo { start: 0, end: 5 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"inthe";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"in the"),
         "should suggest 'in the' for 'inthe' via split, got {:?}",
@@ -1280,9 +1305,8 @@ fn test_suggest_word_split() {
 #[test]
 fn test_suggest_deletion() {
     let dict = load_dict();
-    let input = b"helllo";
-    let typo = Typo { start: 0, end: 6 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"helllo";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"hello"),
         "should suggest 'hello' for 'helllo' via deletion, got {:?}",
@@ -1296,9 +1320,8 @@ fn test_suggest_deletion() {
 #[test]
 fn test_suggest_insertion() {
     let dict = load_dict();
-    let input = b"helo";
-    let typo = Typo { start: 0, end: 4 };
-    let suggestions = dict.suggestions(&typo, input);
+    let word = b"helo";
+    let suggestions = dict.suggestions(word);
     assert!(
         suggestions.iter().any(|s| s == b"hello"),
         "should suggest 'hello' for 'helo' via insertion, got {:?}",
@@ -1335,12 +1358,8 @@ fn bench_suggest_perf() {
     ];
 
     for &typo_word in typos {
-        let t = Typo {
-            start: 0,
-            end: typo_word.len() as u32,
-        };
         let start = std::time::Instant::now();
-        let suggestions = dict.suggestions(&t, typo_word);
+        let suggestions = dict.suggestions(typo_word);
         let elapsed = start.elapsed();
         eprintln!(
             "{:<20} {:>2} suggestions  {:>8.3} ms",
@@ -1356,11 +1375,7 @@ fn bench_suggest_perf() {
 fn debug_inthe_deep_scoring() {
     let dict = load_dict();
     let typo_word = b"inthe";
-    let t = Typo {
-        start: 0,
-        end: typo_word.len() as u32,
-    };
-    let results = dict.suggestions_debug(&t, typo_word);
+    let results = dict.suggestions_debug(typo_word);
 
     println!(
         "=== Rust deep ranking for 'inthe' ({} candidates) ===",
@@ -1383,4 +1398,179 @@ fn debug_inthe_deep_scoring() {
             marker,
         );
     }
+}
+
+#[test]
+fn test_user_dict_add_good_word() {
+    let mut dict = load_dict();
+
+    // Verify "xyzabc" is not in dictionary
+    assert!(!dict.check_word(b"xyzabc"));
+
+    // Add it as a good word
+    dict.add_good_word(b"xyzabc");
+
+    // Now it should be valid
+    assert!(dict.check_word(b"xyzabc"));
+}
+
+#[test]
+fn test_user_dict_ban_word() {
+    let mut dict = load_dict();
+
+    // "hello" is in the dictionary
+    assert!(dict.check_word(b"hello"));
+
+    // Ban it
+    dict.ban_word(b"hello");
+
+    // Now it should fail
+    assert!(!dict.check_word(b"hello"));
+}
+
+#[test]
+fn test_user_dict_remove_word() {
+    let mut dict = load_dict();
+
+    // Add a good word
+    dict.add_good_word(b"testword");
+    assert!(dict.check_word(b"testword"));
+
+    // Remove it
+    dict.remove_user_word(b"testword");
+
+    // Should not be valid anymore
+    assert!(!dict.check_word(b"testword"));
+}
+
+#[test]
+fn test_user_dict_good_overrides_banned() {
+    let mut dict = load_dict();
+
+    // Ban a word
+    dict.ban_word(b"testword");
+    assert!(!dict.check_word(b"testword"));
+
+    // Add as good (should override banned)
+    dict.add_good_word(b"testword");
+    assert!(dict.check_word(b"testword"));
+}
+
+#[test]
+fn test_user_dict_banned_overrides_good() {
+    let mut dict = load_dict();
+
+    // Add as good
+    dict.add_good_word(b"testword");
+    assert!(dict.check_word(b"testword"));
+
+    // Ban it (should override good)
+    dict.ban_word(b"testword");
+    assert!(!dict.check_word(b"testword"));
+}
+
+#[test]
+fn test_user_dict_spell_check_iter() {
+    let mut dict = load_dict();
+
+    // Add "sampl" as a good word
+    dict.add_good_word(b"sampl");
+
+    // "sampl" should no longer be detected as a typo
+    let input = b"This is a sampl text with no typos";
+    let typos: Vec<_> = dict.spell_check(input).collect();
+    assert!(typos.is_empty());
+
+    // But other typos should still be detected
+    let input2 = b"This is a goood text";
+    let typos2: Vec<_> = dict.spell_check(input2).collect();
+    assert!(!typos2.is_empty());
+}
+
+#[test]
+fn test_user_dict_banned_in_spell_check() {
+    let mut dict = load_dict();
+
+    // Ban a valid word
+    dict.ban_word(b"hello");
+
+    let input = b"hello world";
+    let typos: Vec<_> = dict.spell_check(input).collect();
+
+    // "hello" should be detected as a typo
+    assert_eq!(typos.len(), 1);
+    assert_eq!(&input[typos[0].clone()], b"hello");
+}
+
+#[test]
+fn test_user_dict_in_suggestions() {
+    let mut dict = load_dict();
+
+    // Add a custom word that's close to a typo
+    dict.add_good_word(b"samply");
+
+    let word = b"sampl";
+    let suggestions = dict.suggestions(word);
+
+    // "samply" should appear in suggestions
+    assert!(
+        suggestions.iter().any(|s| s == b"samply"),
+        "User word 'samply' should appear in suggestions, got {:?}",
+        suggestions
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_user_dict_clear() {
+    let mut dict = load_dict();
+
+    // Add some words
+    dict.add_good_word(b"word1");
+    dict.ban_word(b"word2");
+
+    // Verify they work
+    assert!(dict.check_word(b"word1"));
+    assert!(!dict.check_word(b"word2"));
+
+    // Remove both words
+    dict.remove_user_word(b"word1");
+    dict.remove_user_word(b"word2");
+
+    // word1 should now be invalid again
+    assert!(!dict.check_word(b"word1"));
+    // word2 should be valid again (it's in the main dictionary)
+    assert!(dict.check_word(b"world"));
+}
+
+#[test]
+fn test_user_dict_case_sensitive() {
+    let mut dict = load_dict();
+
+    // Add lowercase version
+    dict.add_good_word(b"myword");
+
+    // Lowercase should be valid
+    assert!(dict.check_word(b"myword"));
+
+    // Uppercase should still use regular dictionary rules
+    // (might be valid with ONECAP flag depending on charflags)
+}
+
+#[test]
+fn test_user_dict_banned_has_priority() {
+    let mut dict = load_dict();
+
+    // Ban a word that exists in the dictionary
+    dict.ban_word(b"world");
+
+    // Should fail even though it's in the main dictionary
+    assert!(!dict.check_word(b"world"));
+
+    // Should be detected as a typo in spell check
+    let input = b"hello world";
+    let typos: Vec<_> = dict.spell_check(input).collect();
+    assert!(typos.iter().any(|t| &input[t.clone()] == b"world"));
 }
