@@ -476,8 +476,8 @@ impl fmt::Display for Trace {
         let mut buckets = vec![0u64; num_buckets.max(1)];
         for node in &self.nodes {
             let b = (node.score / bucket_size) as usize;
-            if b < buckets.len() {
-                buckets[b] += 1;
+            if let Some(bucket) = buckets.get_mut(b) {
+                *bucket += 1;
             }
         }
         let max_bucket = *buckets.iter().max().unwrap_or(&1);

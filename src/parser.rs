@@ -674,7 +674,7 @@ fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseErr
         }
 
         // Check for (abc) oneof group.
-        if fi < from_chars.len() && from_chars[fi] == '(' {
+        if from_chars.get(fi) == Some(&'(') {
             fi += 1; // skip '('
             while fi < from_chars.len() && from_chars[fi] != ')' {
                 oneof.push(from_chars[fi]);

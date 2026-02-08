@@ -100,31 +100,29 @@ pub(crate) fn soundfold_wsal(sal: &SalInfo, input: &[u8], charflags: &CharFlags)
                 let rules = &smp[n].rules;
                 let mut pri: i32 = 5;
 
-                p0 = if rules.is_empty() { 0 } else { rules[0] as i32 };
+                p0 = rules.first().map_or(0, |&b| b as i32);
                 let k0 = k;
                 let mut si = 0usize;
 
-                while si < rules.len() && rules[si] == b'-' && k > 1 {
+                while rules.get(si) == Some(&b'-') && k > 1 {
                     k -= 1;
                     si += 1;
                 }
-                if si < rules.len() && rules[si] == b'<' {
+                if rules.get(si) == Some(&b'<') {
                     si += 1;
                 }
-                if si < rules.len() && rules[si].is_ascii_digit() {
-                    pri = (rules[si] - b'0') as i32;
+                if let Some(&b) = rules.get(si)
+                    && b.is_ascii_digit()
+                {
+                    pri = (b - b'0') as i32;
                     si += 1;
                 }
-                if si + 1 < rules.len() && rules[si] == b'^' && rules[si + 1] == b'^' {
+                if rules.get(si..).is_some_and(|r| r.starts_with(b"^^")) {
                     si += 1;
                 }
 
-                let sc = if si < rules.len() { rules[si] } else { 0 };
-                let sc_next = if si + 1 < rules.len() {
-                    rules[si + 1]
-                } else {
-                    0
-                };
+                let sc = rules.get(si).copied().unwrap_or(0);
+                let sc_next = rules.get(si + 1).copied().unwrap_or(0);
 
                 let wk0 = word[i + k0];
                 let is_word_at_k0 = wk0 != '\0' && is_word_char_w(wk0, charflags);
@@ -198,18 +196,20 @@ pub(crate) fn soundfold_wsal(sal: &SalInfo, input: &[u8], charflags: &CharFlags)
                         let mut fp0: i32 = 5;
                         let frules = &smp[n0].rules;
                         let mut fsi = 0usize;
-                        while fsi < frules.len() && frules[fsi] == b'-' {
+                        while frules.get(fsi) == Some(&b'-') {
                             fsi += 1;
                         }
-                        if fsi < frules.len() && frules[fsi] == b'<' {
+                        if frules.get(fsi) == Some(&b'<') {
                             fsi += 1;
                         }
-                        if fsi < frules.len() && frules[fsi].is_ascii_digit() {
-                            fp0 = (frules[fsi] - b'0') as i32;
+                        if let Some(&b) = frules.get(fsi)
+                            && b.is_ascii_digit()
+                        {
+                            fp0 = (b - b'0') as i32;
                             fsi += 1;
                         }
 
-                        let fcond = if fsi < frules.len() { frules[fsi] } else { 0 };
+                        let fcond = frules.get(fsi).copied().unwrap_or(0);
                         let fwk0 = word[i + fk0];
                         let f_is_word_at_k0 = fwk0 != '\0' && is_word_char_w(fwk0, charflags);
 
@@ -354,8 +354,14 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
             return SCORE_MAXMAX;
         }
 
-        if (badsound.len() > 1 && goodsound.len() > 1 && badsound[1] == goodsound[1])
-            || (badsound.len() > 2 && goodsound.len() > 2 && badsound[2] == goodsound[2])
+        if badsound
+            .get(1)
+            .zip(goodsound.get(1))
+            .is_some_and(|(a, b)| a == b)
+            || badsound
+                .get(2)
+                .zip(goodsound.get(2))
+                .is_some_and(|(a, b)| a == b)
         {
             // Handle like a substitute.
         } else {
@@ -384,7 +390,7 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
     };
 
     // Skip identical prefix.
-    while !pl.is_empty() && !ps.is_empty() && pl[0] == ps[0] {
+    while pl.first().is_some_and(|a| ps.first() == Some(a)) {
         pl = &pl[1..];
         ps = &ps[1..];
     }
@@ -396,11 +402,13 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
                 return SCORE_MAXMAX;
             }
             pl = &pl[1..]; // first delete
-            while !pl.is_empty() && !ps.is_empty() && pl[0] == ps[0] {
+            while pl.first().is_some_and(|a| ps.first() == Some(a)) {
                 pl = &pl[1..];
                 ps = &ps[1..];
             }
-            if !pl.is_empty() && pl[1..] == *ps {
+            if let [_, rest @ ..] = pl
+                && rest == ps
+            {
                 return score + SCORE_DEL * 2;
             }
         }
@@ -409,7 +417,7 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
 
             // 1: delete
             let (mut pl2, mut ps2) = (&pl[1..], ps);
-            while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
+            while pl2.first().is_some_and(|a| ps2.first() == Some(a)) {
                 pl2 = &pl2[1..];
                 ps2 = &ps2[1..];
             }
@@ -418,40 +426,53 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
             }
 
             // 2: delete then swap
-            if pl2.len() >= 2
-                && ps2.len() >= 2
-                && pl2[0] == ps2[1]
-                && pl2[1] == ps2[0]
-                && pl2[2..] == ps2[2..]
+            if let [a1, b1, rest1 @ ..] = pl2
+                && let [a2, b2, rest2 @ ..] = ps2
+                && a1 == b2
+                && b1 == a2
+                && rest1 == rest2
             {
                 return score + SCORE_DEL + SCORE_SWAP;
             }
 
             // 3: delete then substitute
-            if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
+            if let [_, rest_a @ ..] = pl2
+                && let [_, rest_b @ ..] = ps2
+                && rest_a == rest_b
+            {
                 return score + SCORE_DEL + SCORE_SUBST;
             }
 
             // 4: first swap then delete
-            if pl.len() >= 2 && ps.len() >= 2 && pl[0] == ps[1] && pl[1] == ps[0] {
-                let (mut pl2, mut ps2) = (&pl[2..], &ps[2..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
+            if let [a, b, rest_pl @ ..] = pl
+                && let [c, d, rest_ps @ ..] = ps
+                && a == d
+                && b == c
+            {
+                let (mut pl2, mut ps2) = (rest_pl, rest_ps);
+                while pl2.first().is_some_and(|a| ps2.first() == Some(a)) {
                     pl2 = &pl2[1..];
                     ps2 = &ps2[1..];
                 }
-                if !pl2.is_empty() && pl2[1..] == *ps2 {
+                if let [_, rest @ ..] = pl2
+                    && rest == ps2
+                {
                     return score + SCORE_SWAP + SCORE_DEL;
                 }
             }
 
             // 5: first substitute then delete
-            if !pl.is_empty() && !ps.is_empty() {
-                let (mut pl2, mut ps2) = (&pl[1..], &ps[1..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
+            if let [_, rest_pl @ ..] = pl
+                && let [_, rest_ps @ ..] = ps
+            {
+                let (mut pl2, mut ps2) = (rest_pl, rest_ps);
+                while pl2.first().is_some_and(|a| ps2.first() == Some(a)) {
                     pl2 = &pl2[1..];
                     ps2 = &ps2[1..];
                 }
-                if !pl2.is_empty() && pl2[1..] == *ps2 {
+                if let [_, rest @ ..] = pl2
+                    && rest == ps2
+                {
                     return score + SCORE_SUBST + SCORE_DEL;
                 }
             }
@@ -464,9 +485,13 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
             }
 
             // 2: swap
-            if pl.len() >= 2 && ps.len() >= 2 && pl[0] == ps[1] && pl[1] == ps[0] {
-                let (mut pl2, mut ps2) = (&pl[2..], &ps[2..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
+            if let [a, b, rest_pl @ ..] = pl
+                && let [c, d, rest_ps @ ..] = ps
+                && a == d
+                && b == c
+            {
+                let (mut pl2, mut ps2) = (rest_pl, rest_ps);
+                while pl2.first().is_some_and(|a| ps2.first() == Some(a)) {
                     pl2 = &pl2[1..];
                     ps2 = &ps2[1..];
                 }
@@ -474,24 +499,29 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
                     return score + SCORE_SWAP;
                 }
                 // 3: swap and swap
-                if pl2.len() >= 2
-                    && ps2.len() >= 2
-                    && pl2[0] == ps2[1]
-                    && pl2[1] == ps2[0]
-                    && pl2[2..] == ps2[2..]
+                if let [a1, b1, rest1 @ ..] = pl2
+                    && let [a2, b2, rest2 @ ..] = ps2
+                    && a1 == b2
+                    && b1 == a2
+                    && rest1 == rest2
                 {
                     return score + SCORE_SWAP + SCORE_SWAP;
                 }
                 // 4: swap and substitute
-                if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
+                if let [_, rest_a @ ..] = pl2
+                    && let [_, rest_b @ ..] = ps2
+                    && rest_a == rest_b
+                {
                     return score + SCORE_SWAP + SCORE_SUBST;
                 }
             }
 
             // 5: substitute
-            if !pl.is_empty() && !ps.is_empty() {
-                let (mut pl2, mut ps2) = (&pl[1..], &ps[1..]);
-                while !pl2.is_empty() && !ps2.is_empty() && pl2[0] == ps2[0] {
+            if let [_, rest_pl @ ..] = pl
+                && let [_, rest_ps @ ..] = ps
+            {
+                let (mut pl2, mut ps2) = (rest_pl, rest_ps);
+                while pl2.first().is_some_and(|a| ps2.first() == Some(a)) {
                     pl2 = &pl2[1..];
                     ps2 = &ps2[1..];
                 }
@@ -499,34 +529,43 @@ pub(crate) fn soundalike_score(goodstart: &[u8], badstart: &[u8]) -> i32 {
                     return score + SCORE_SUBST;
                 }
                 // 6: substitute and swap
-                if pl2.len() >= 2
-                    && ps2.len() >= 2
-                    && pl2[0] == ps2[1]
-                    && pl2[1] == ps2[0]
-                    && pl2[2..] == ps2[2..]
+                if let [a1, b1, rest1 @ ..] = pl2
+                    && let [a2, b2, rest2 @ ..] = ps2
+                    && a1 == b2
+                    && b1 == a2
+                    && rest1 == rest2
                 {
                     return score + SCORE_SUBST + SCORE_SWAP;
                 }
                 // 7: substitute and substitute
-                if !pl2.is_empty() && !ps2.is_empty() && pl2[1..] == ps2[1..] {
+                if let [_, rest_a @ ..] = pl2
+                    && let [_, rest_b @ ..] = ps2
+                    && rest_a == rest_b
+                {
                     return score + SCORE_SUBST + SCORE_SUBST;
                 }
                 // 8: insert then delete
-                let (mut pl3, mut ps3) = (pl, &ps[1..]);
-                while !pl3.is_empty() && !ps3.is_empty() && pl3[0] == ps3[0] {
+                let (mut pl3, mut ps3) = (pl, rest_ps);
+                while pl3.first().is_some_and(|a| ps3.first() == Some(a)) {
                     pl3 = &pl3[1..];
                     ps3 = &ps3[1..];
                 }
-                if !pl3.is_empty() && !ps3.is_empty() && pl3[1..] == *ps3 {
+                if let [_, rest @ ..] = pl3
+                    && !ps3.is_empty()
+                    && rest == ps3
+                {
                     return score + SCORE_INS + SCORE_DEL;
                 }
                 // 9: delete then insert
-                let (mut pl3, mut ps3) = (&pl[1..], ps);
-                while !pl3.is_empty() && !ps3.is_empty() && pl3[0] == ps3[0] {
+                let (mut pl3, mut ps3) = (rest_pl, ps);
+                while pl3.first().is_some_and(|a| ps3.first() == Some(a)) {
                     pl3 = &pl3[1..];
                     ps3 = &ps3[1..];
                 }
-                if !pl3.is_empty() && !ps3.is_empty() && *pl3 == ps3[1..] {
+                if let [_, rest @ ..] = ps3
+                    && !pl3.is_empty()
+                    && pl3 == rest
+                {
                     return score + SCORE_INS + SCORE_DEL;
                 }
             }

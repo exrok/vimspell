@@ -236,9 +236,9 @@ fn find_keepcap_word(keeptree: &WordTree, fword: &[u8]) -> Option<Vec<u8>> {
         if d == fword_len {
             // Check for word-end (NUL byte) at this position
             let ai = arr[d];
-            if ai < node.len() {
-                let len = node[ai] as usize;
-                if len > 0 && ai + 1 < node.len() && node[ai + 1] == 0 {
+            if let Some(&len_byte) = node.get(ai) {
+                let len = len_byte as usize;
+                if len > 0 && node.get(ai + 1) == Some(&0) {
                     return Some(kword.clone());
                 }
             }

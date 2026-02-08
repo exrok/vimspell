@@ -379,7 +379,7 @@ impl CompoundRules {
                     if p < rule.len() {
                         p += 1;
                     }
-                    if p < rule.len() && (rule[p] == b'*' || rule[p] == b'?') {
+                    if matches!(rule.get(p), Some(b'*' | b'?')) {
                         p += 1;
                     } else {
                         return false;
@@ -619,7 +619,7 @@ fn match_prefix_condition(cond: &[u8], word: &[u8]) -> bool {
         match cond[ci] {
             b'[' => {
                 ci += 1;
-                let negated = ci < cond.len() && cond[ci] == b'^';
+                let negated = cond.get(ci) == Some(&b'^');
                 if negated {
                     ci += 1;
                 }
