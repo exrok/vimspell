@@ -37,20 +37,20 @@ fn test_parse_dictionary() {
 fn test_check_valid_words() {
     let dict = load_dict();
 
-    assert!(dict.check_word("hello"));
-    assert!(dict.check_word("world"));
-    assert!(dict.check_word("the"));
-    assert!(dict.check_word("is"));
-    assert!(dict.check_word("a"));
+    assert!(dict.accepts_word("hello"));
+    assert!(dict.accepts_word("world"));
+    assert!(dict.accepts_word("the"));
+    assert!(dict.accepts_word("is"));
+    assert!(dict.accepts_word("a"));
 }
 
 #[test]
 fn test_check_invalid_words() {
     let dict = load_dict();
 
-    assert!(!dict.check_word("asdfgh"));
-    assert!(!dict.check_word("xyzabc"));
-    assert!(!dict.check_word("sampl"));
+    assert!(!dict.accepts_word("asdfgh"));
+    assert!(!dict.accepts_word("xyzabc"));
+    assert!(!dict.accepts_word("sampl"));
 }
 
 #[test]
@@ -200,21 +200,21 @@ fn test_compound_info() {
 #[test]
 fn test_prefix_words_in_foldtree() {
     let dict = load_dict();
-    assert!(dict.check_word("undo"));
-    assert!(dict.check_word("unkind"));
-    assert!(dict.check_word("unable"));
-    assert!(dict.check_word("unlike"));
-    assert!(dict.check_word("rewrite"));
-    assert!(dict.check_word("reopen"));
-    assert!(dict.check_word("unhappy"));
-    assert!(dict.check_word("restart"));
+    assert!(dict.accepts_word("undo"));
+    assert!(dict.accepts_word("unkind"));
+    assert!(dict.accepts_word("unable"));
+    assert!(dict.accepts_word("unlike"));
+    assert!(dict.accepts_word("rewrite"));
+    assert!(dict.accepts_word("reopen"));
+    assert!(dict.accepts_word("unhappy"));
+    assert!(dict.accepts_word("restart"));
 }
 
 #[test]
 fn test_prefix_invalid_combos() {
     let dict = load_dict();
-    assert!(!dict.check_word("unxyzabc"));
-    assert!(!dict.check_word("rexyzabc"));
+    assert!(!dict.accepts_word("unxyzabc"));
+    assert!(!dict.accepts_word("rexyzabc"));
 }
 
 fn build_prefix_dict() -> Dictionary {
@@ -306,25 +306,25 @@ fn build_prefix_dict() -> Dictionary {
 #[test]
 fn test_prefix_synthetic_valid() {
     let dict = build_prefix_dict();
-    assert!(dict.check_word("unhappy"));
+    assert!(dict.accepts_word("unhappy"));
 }
 
 #[test]
 fn test_prefix_synthetic_root_valid() {
     let dict = build_prefix_dict();
-    assert!(dict.check_word("happy"));
+    assert!(dict.accepts_word("happy"));
 }
 
 #[test]
 fn test_prefix_synthetic_wrong_prefix() {
     let dict = build_prefix_dict();
-    assert!(!dict.check_word("rehappy"));
+    assert!(!dict.accepts_word("rehappy"));
 }
 
 #[test]
 fn test_prefix_synthetic_nonsense_after_prefix() {
     let dict = build_prefix_dict();
-    assert!(!dict.check_word("unxyzabc"));
+    assert!(!dict.accepts_word("unxyzabc"));
 }
 
 #[test]
@@ -420,12 +420,12 @@ fn test_prefix_synthetic_with_condition() {
     };
 
     // "unok" -> prefix "un" + "ok", "ok" starts with 'o' which is in [ao] -> valid
-    assert!(dict.check_word("unok"));
+    assert!(dict.accepts_word("unok"));
     // "unak" -> prefix "un" + "ak", "ak" starts with 'a' which is in [ao] -> valid
-    assert!(dict.check_word("unak"));
+    assert!(dict.accepts_word("unak"));
     // Direct lookups also work
-    assert!(dict.check_word("ok"));
-    assert!(dict.check_word("ak"));
+    assert!(dict.accepts_word("ok"));
+    assert!(dict.accepts_word("ak"));
 }
 
 #[test]
@@ -476,8 +476,8 @@ fn test_prefix_synthetic_rare_prefix() {
     };
 
     // "ago" -> prefix "a" + "go", rare prefix -> ValidRare
-    assert!(dict.check_word("ago"));
-    assert!(dict.check_word("go"));
+    assert!(dict.accepts_word("ago"));
+    assert!(dict.accepts_word("go"));
 }
 
 #[test]
@@ -831,23 +831,23 @@ fn test_region_filtering_synthetic() {
     };
 
     // With REGION_ALL (default), both words are valid.
-    assert!(dict.check_word("color"));
-    assert!(dict.check_word("colour"));
+    assert!(dict.accepts_word("color"));
+    assert!(dict.accepts_word("colour"));
 
     // Set region to "gb" (bit 1) — "colour" should be valid, "color" still valid (no region flag).
     dict.set_region(b"gb");
-    assert!(dict.check_word("color"));
-    assert!(dict.check_word("colour"));
+    assert!(dict.accepts_word("color"));
+    assert!(dict.accepts_word("colour"));
 
     // Set region to "us" (bit 0) — "colour" should be rejected (region mismatch).
     dict.set_region(b"us");
-    assert!(dict.check_word("color"));
-    assert!(!dict.check_word("colour"));
+    assert!(dict.accepts_word("color"));
+    assert!(!dict.accepts_word("colour"));
 
     // Clear region — both valid again.
     dict.clear_region();
-    assert!(dict.check_word("color"));
-    assert!(dict.check_word("colour"));
+    assert!(dict.accepts_word("color"));
+    assert!(dict.accepts_word("colour"));
 }
 
 #[test]
@@ -892,15 +892,15 @@ fn test_region_wrong_region_result() {
     };
 
     // REGION_ALL: valid
-    assert!(dict.check_word("grey"));
+    assert!(dict.accepts_word("grey"));
 
     // Set to "gb" (bit 1): matches region mask 0x02 → valid
     dict.set_region(b"gb");
-    assert!(dict.check_word("grey"));
+    assert!(dict.accepts_word("grey"));
 
-    // Set to "us" (bit 0): doesn't match 0x02 → wrong region → check_word returns false
+    // Set to "us" (bit 0): doesn't match 0x02 → wrong region → accepts_word returns false
     dict.set_region(b"us");
-    assert!(!dict.check_word("grey"));
+    assert!(!dict.accepts_word("grey"));
 
     // But the word still exists — check_word_internal should return WrongRegion, not NotFound
     assert_eq!(dict.check_word_internal(b"grey"), WordResult::WrongRegion);
@@ -912,7 +912,7 @@ fn test_region_set_unknown() {
     // Setting an unknown region should fall back to REGION_ALL.
     dict.set_region(b"zz");
     // All normal words should still be valid.
-    assert!(dict.check_word("hello"));
+    assert!(dict.accepts_word("hello"));
 }
 
 #[test]
@@ -1426,13 +1426,13 @@ fn test_user_dict_add_good_word() {
     let mut dict = load_dict();
 
     // Verify "xyzabc" is not in dictionary
-    assert!(!dict.check_word("xyzabc"));
+    assert!(!dict.accepts_word("xyzabc"));
 
     // Add it as a good word
-    dict.accept_word("xyzabc");
+    dict.insert_accepted_word("xyzabc");
 
     // Now it should be valid
-    assert!(dict.check_word("xyzabc"));
+    assert!(dict.accepts_word("xyzabc"));
 }
 
 #[test]
@@ -1440,13 +1440,13 @@ fn test_user_dict_ban_word() {
     let mut dict = load_dict();
 
     // "hello" is in the dictionary
-    assert!(dict.check_word("hello"));
+    assert!(dict.accepts_word("hello"));
 
     // Ban it
-    dict.ban_word("hello");
+    dict.insert_banned_word("hello");
 
     // Now it should fail
-    assert!(!dict.check_word("hello"));
+    assert!(!dict.accepts_word("hello"));
 }
 
 #[test]
@@ -1454,14 +1454,14 @@ fn test_user_dict_remove_word() {
     let mut dict = load_dict();
 
     // Add a good word
-    dict.accept_word("testword");
-    assert!(dict.check_word("testword"));
+    dict.insert_accepted_word("testword");
+    assert!(dict.accepts_word("testword"));
 
     // Remove it
-    dict.remove_user_word("testword");
+    dict.remove_inserted_word("testword");
 
     // Should not be valid anymore
-    assert!(!dict.check_word("testword"));
+    assert!(!dict.accepts_word("testword"));
 }
 
 #[test]
@@ -1469,12 +1469,12 @@ fn test_user_dict_good_overrides_banned() {
     let mut dict = load_dict();
 
     // Ban a word
-    dict.ban_word("testword");
-    assert!(!dict.check_word("testword"));
+    dict.insert_banned_word("testword");
+    assert!(!dict.accepts_word("testword"));
 
     // Add as good (should override banned)
-    dict.accept_word("testword");
-    assert!(dict.check_word("testword"));
+    dict.insert_accepted_word("testword");
+    assert!(dict.accepts_word("testword"));
 }
 
 #[test]
@@ -1482,12 +1482,12 @@ fn test_user_dict_banned_overrides_good() {
     let mut dict = load_dict();
 
     // Add as good
-    dict.accept_word("testword");
-    assert!(dict.check_word("testword"));
+    dict.insert_accepted_word("testword");
+    assert!(dict.accepts_word("testword"));
 
     // Ban it (should override good)
-    dict.ban_word("testword");
-    assert!(!dict.check_word("testword"));
+    dict.insert_banned_word("testword");
+    assert!(!dict.accepts_word("testword"));
 }
 
 #[test]
@@ -1495,7 +1495,7 @@ fn test_user_dict_spell_check_iter() {
     let mut dict = load_dict();
 
     // Add "sampl" as a good word
-    dict.accept_word("sampl");
+    dict.insert_accepted_word("sampl");
 
     // "sampl" should no longer be detected as a typo
     let input = b"This is a sampl text with no typos";
@@ -1513,7 +1513,7 @@ fn test_user_dict_banned_in_spell_check() {
     let mut dict = load_dict();
 
     // Ban a valid word
-    dict.ban_word("hello");
+    dict.insert_banned_word("hello");
 
     let input = b"hello world";
     let typos: Vec<_> = dict.spell_check(input).collect();
@@ -1528,7 +1528,7 @@ fn test_user_dict_in_suggestions() {
     let mut dict = load_dict();
 
     // Add a custom word that's close to a typo
-    dict.accept_word("samply");
+    dict.insert_accepted_word("samply");
 
     let word = "sampl";
     let suggestions = dict.suggestions(word, 25, 350);
@@ -1549,21 +1549,21 @@ fn test_user_dict_clear() {
     let mut dict = load_dict();
 
     // Add some words
-    dict.accept_word("word1");
-    dict.ban_word("word2");
+    dict.insert_accepted_word("word1");
+    dict.insert_banned_word("word2");
 
     // Verify they work
-    assert!(dict.check_word("word1"));
-    assert!(!dict.check_word("word2"));
+    assert!(dict.accepts_word("word1"));
+    assert!(!dict.accepts_word("word2"));
 
     // Remove both words
-    dict.remove_user_word("word1");
-    dict.remove_user_word("word2");
+    dict.remove_inserted_word("word1");
+    dict.remove_inserted_word("word2");
 
     // word1 should now be invalid again
-    assert!(!dict.check_word("word1"));
+    assert!(!dict.accepts_word("word1"));
     // word2 should be valid again (it's in the main dictionary)
-    assert!(dict.check_word("world"));
+    assert!(dict.accepts_word("world"));
 }
 
 #[test]
@@ -1571,10 +1571,10 @@ fn test_user_dict_case_sensitive() {
     let mut dict = load_dict();
 
     // Add lowercase version
-    dict.accept_word("myword");
+    dict.insert_accepted_word("myword");
 
     // Lowercase should be valid
-    assert!(dict.check_word("myword"));
+    assert!(dict.accepts_word("myword"));
 
     // Uppercase should still use regular dictionary rules
     // (might be valid with ONECAP flag depending on charflags)
@@ -1585,10 +1585,10 @@ fn test_user_dict_banned_has_priority() {
     let mut dict = load_dict();
 
     // Ban a word that exists in the dictionary
-    dict.ban_word("world");
+    dict.insert_banned_word("world");
 
     // Should fail even though it's in the main dictionary
-    assert!(!dict.check_word("world"));
+    assert!(!dict.accepts_word("world"));
 
     // Should be detected as a typo in spell check
     let input = b"hello world";

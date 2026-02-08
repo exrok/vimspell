@@ -11,7 +11,7 @@ Fast spell checking using Vim's `.spl` dictionary files.
 ## Features
 
 - Fast: More than 3 times faster than C implementation in neovim.
-- Drop-in Vim compatibility: Uses the same `.spl` files as Vim (format version 50)
+- Drop-in Vim compatibility: Uses the same `.spl` files as Vim (format version 2)
 - Smart suggestions: Edit distance + phonetic similarity (SAL) + character similarity (MAP)
 - Regional variants: Filter by region (US/UK English, etc.)
 - User dictionaries: Add custom words or ban incorrect ones at runtime
@@ -27,9 +27,7 @@ let bytes = std::fs::read("en.utf-8.spl").unwrap();
 let dict = Dictionary::parse(&bytes).unwrap();
 
 // Check a word
-if dict.check_word("hello") {
-    println!("Correct!");
-}
+assert!(dict.accepts_word("hello"));
 
 // Get suggestions for typos (top 25, max score 350)
 for (word, score) in dict.suggestions("speling", 25, 350) {
@@ -66,12 +64,12 @@ Or create your own with Neovim's `:mkspell` command.
 let mut dict = Dictionary::parse(&bytes).unwrap();
 
 // Add technical terms
-dict.accept_word("rustdoc");
-dict.accept_word("async");
+dict.insert_accepted_word("rustdoc");
+dict.insert_accepted_word("async");
 
 // Ban common mistakes
-dict.ban_word("alot");
-dict.ban_word("irregardless");
+dict.insert_banned_word("alot");
+dict.insert_banned_word("irregardless");
 ```
 
 ### Regional Preferences
@@ -104,8 +102,8 @@ for (word, score) in &thorough {
 ## Limitations
 
 - Only supports VIMspell format version 2 (the current standard since 2006)
-- Maximum word length: 254 bytes
-- Affix rules (prefixes/suffixes) are parsed but not used in suggestions yet
+- For non-english languages, Affix rules (prefixes/suffixes) are not used.
+- Limited testing on non-english languages.
 
 ## Acknowledgments
 

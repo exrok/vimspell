@@ -16,7 +16,7 @@
 //! let dict = Dictionary::parse(&bytes).unwrap();
 //!
 //! // Check a word
-//! if dict.check_word("hello") {
+//! if dict.accepts_word("hello") {
 //!     println!("Correct!");
 //! }
 //!
@@ -44,8 +44,8 @@
 //! # use vimspell::Dictionary;
 //! # let bytes = std::fs::read("en.utf-8.spl").unwrap();
 //! # let mut dict = Dictionary::parse(&bytes).unwrap();
-//! dict.accept_word("rustdoc");
-//! dict.ban_word("irregardless");
+//! dict.insert_accepted_word("rustdoc");
+//! dict.insert_banned_word("irregardless");
 //! ```
 //!
 //! Set regional preferences:
@@ -693,8 +693,8 @@ struct SalInfo {
 /// let dict = Dictionary::parse(&bytes).unwrap();
 ///
 /// // Check words
-/// assert!(dict.check_word("correct"));
-/// assert!(!dict.check_word("wrng"));
+/// assert!(dict.accepts_word("correct"));
+/// assert!(!dict.accepts_word("wrng"));
 ///
 /// // Get suggestions
 /// let suggestions = dict.suggestions("speling", 25, 350);
@@ -861,8 +861,8 @@ impl Dictionary {
         results
     }
 
-    /// Checks if a single word is spelled correctly.
-    pub fn check_word(&self, word: impl AsRef<[u8]>) -> bool {
+    /// Returns true if a single word is spelled correctly.
+    pub fn accepts_word(&self, word: impl AsRef<[u8]>) -> bool {
         matches!(
             self.check_word_internal(word.as_ref()),
             WordResult::Valid | WordResult::ValidRare
@@ -896,7 +896,7 @@ impl Dictionary {
     /// Adds a word to the user dictionary as correct.
     ///
     /// The word will be accepted during spell checking even if not in the main dictionary.
-    pub fn accept_word(&mut self, word: &str) {
+    pub fn insert_accepted_word(&mut self, word: &str) {
         let word = word.as_bytes();
         let _ = self
             .user_banned_words
@@ -917,7 +917,7 @@ impl Dictionary {
     /// Marks a word as banned (incorrect).
     ///
     /// The word will be flagged as a spelling error even if it exists in the main dictionary.
-    pub fn ban_word(&mut self, word: &str) {
+    pub fn insert_banned_word(&mut self, word: &str) {
         let word = word.as_bytes();
         let _ = self
             .user_good_words
@@ -936,7 +936,7 @@ impl Dictionary {
     }
 
     /// Removes a word from the user dictionary (both accepted and banned lists).
-    pub fn remove_user_word(&mut self, word: &str) {
+    pub fn remove_inserted_word(&mut self, word: &str) {
         let word = word.as_bytes();
         let _ = self
             .user_good_words
@@ -1939,7 +1939,7 @@ impl Iterator for SpellCheckIter<'_> {
                 continue;
             }
 
-            if !self.dict.check_word(word) {
+            if !self.dict.accepts_word(word) {
                 return Some(start..end);
             }
         }
