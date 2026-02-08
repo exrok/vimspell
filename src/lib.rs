@@ -16,18 +16,18 @@
 //! let dict = Dictionary::parse(&bytes).unwrap();
 //!
 //! // Check a word
-//! if dict.check_word(b"hello") {
+//! if dict.check_word("hello") {
 //!     println!("Correct!");
 //! }
 //!
 //! // Get suggestions (top 25, max score 350)
-//! let suggestions = dict.suggestions(b"speling", 25, 350);
+//! let suggestions = dict.suggestions("speling", 25, 350);
 //! println!("Did you mean: {:?}", suggestions);
 //!
 //! // Find typos in text
-//! let text = b"This is a sampel text with mistakse.";
+//! let text = "This is a sampel text with mistakse.";
 //! for range in dict.spell_check(text) {
-//!     println!("Typo: {}", String::from_utf8_lossy(&text[range]));
+//!     println!("Typo: {}", &text[range]);
 //! }
 //! ```
 //!
@@ -44,8 +44,8 @@
 //! # use vimspell::Dictionary;
 //! # let bytes = std::fs::read("en.utf-8.spl").unwrap();
 //! # let mut dict = Dictionary::parse(&bytes).unwrap();
-//! dict.accept_word(b"rustdoc");
-//! dict.ban_word(b"irregardless");
+//! dict.accept_word("rustdoc");
+//! dict.ban_word("irregardless");
 //! ```
 //!
 //! Set regional preferences:
@@ -59,7 +59,7 @@
 
 use std::hash::BuildHasher;
 
-use hashbrown::{HashMap, HashTable, hash_table::Entry};
+use hashbrown::{HashMap, HashTable, hash_map::EntryRef, hash_table::Entry};
 
 use crate::suggest::Query;
 #[cfg(test)]
@@ -693,12 +693,12 @@ struct SalInfo {
 /// let dict = Dictionary::parse(&bytes).unwrap();
 ///
 /// // Check words
-/// assert!(dict.check_word(b"correct"));
-/// assert!(!dict.check_word(b"wrng"));
+/// assert!(dict.check_word("correct"));
+/// assert!(!dict.check_word("wrng"));
 ///
 /// // Get suggestions
-/// let suggestions = dict.suggestions(b"speling", 25, 350);
-/// assert!(suggestions.iter().any(|(w, _)| w == b"spelling"));
+/// let suggestions = dict.suggestions("speling", 25, 350);
+/// assert!(suggestions.iter().any(|(w, _)| w == "spelling"));
 /// ```
 pub struct Dictionary {
     arena: Arena,
@@ -806,23 +806,25 @@ impl Dictionary {
     }
     /// Checks text for spelling errors, returning an iterator of byte ranges.
     ///
+    /// If the input is valid UTF-8 then the returned ranges will be at valid
+    /// UTF-8 character boundaries, such that indexing the input string will
+    /// no panic.
     /// # Examples
     ///
     /// ```no_run
     /// # use vimspell::Dictionary;
     /// # let bytes = std::fs::read("en.utf-8.spl").unwrap();
     /// # let dict = Dictionary::parse(&bytes).unwrap();
-    /// let text = b"This is a tset with mistaks.";
+    /// let text = "This is a tset with mistaks.";
     /// for range in dict.spell_check(text) {
-    ///     let word = &text[range.clone()];
-    ///     println!("Misspelled: {}", String::from_utf8_lossy(word));
+    ///     println!("Misspelled: {}", &text[range]);
     /// }
     /// ```
     pub fn spell_check<'a>(
         &'a self,
-        input: &'a [u8],
-    ) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
-        SpellCheckIter::new(self, input)
+        input: &'a (impl AsRef<[u8]> + ?Sized),
+    ) -> impl Iterator<Item = std::ops::Range<usize>> {
+        SpellCheckIter::new(self, input.as_ref())
     }
 
     /// Gets spelling suggestions with scores for a misspelled word.
@@ -830,14 +832,23 @@ impl Dictionary {
     /// Returns up to `max_count` `(word, score)` pairs sorted by score (lower is better).
     /// Only suggestions with a final score <= `max_score` are returned.
     ///
-    /// Recommanded max_score values between 200 and 350. Large max_score values
+    /// Recommended max_score values between 200 and 350. Large max_score values
     /// will take longer to compute then smaller ones.
     pub fn suggestions(
+        &self,
+        word: impl AsRef<[u8]>,
+        max_count: usize,
+        max_score: i32,
+    ) -> Vec<(String, i32)> {
+        self.suggestions_inner(word.as_ref(), max_count, max_score)
+    }
+
+    fn suggestions_inner(
         &self,
         word: &[u8],
         max_count: usize,
         max_score: i32,
-    ) -> Vec<(Vec<u8>, i32)> {
+    ) -> Vec<(String, i32)> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
         }
@@ -845,7 +856,17 @@ impl Dictionary {
         let mut results = self.rescore_and_sort(scored, word, word.len());
         results.retain(|&(_, score)| score <= max_score);
         results.truncate(max_count);
+        // Note: I would return a Box<str> here, but it's not worth ergonomic burden put
+        // on users of the API.
         results
+    }
+
+    /// Checks if a single word is spelled correctly.
+    pub fn check_word(&self, word: impl AsRef<[u8]>) -> bool {
+        matches!(
+            self.check_word_internal(word.as_ref()),
+            WordResult::Valid | WordResult::ValidRare
+        )
     }
 
     /// Returns the region names defined in this dictionary (e.g., `b"us"`, `b"gb"`, `b"ca"`).
@@ -875,7 +896,8 @@ impl Dictionary {
     /// Adds a word to the user dictionary as correct.
     ///
     /// The word will be accepted during spell checking even if not in the main dictionary.
-    pub fn accept_word(&mut self, word: &[u8]) {
+    pub fn accept_word(&mut self, word: &str) {
+        let word = word.as_bytes();
         let _ = self
             .user_banned_words
             .find_entry(self.hasher.hash_one(word), |bytes| {
@@ -895,7 +917,8 @@ impl Dictionary {
     /// Marks a word as banned (incorrect).
     ///
     /// The word will be flagged as a spelling error even if it exists in the main dictionary.
-    pub fn ban_word(&mut self, word: &[u8]) {
+    pub fn ban_word(&mut self, word: &str) {
+        let word = word.as_bytes();
         let _ = self
             .user_good_words
             .find_entry(self.hasher.hash_one(word), |bytes| {
@@ -913,7 +936,8 @@ impl Dictionary {
     }
 
     /// Removes a word from the user dictionary (both accepted and banned lists).
-    pub fn remove_user_word(&mut self, word: &[u8]) {
+    pub fn remove_user_word(&mut self, word: &str) {
+        let word = word.as_bytes();
         let _ = self
             .user_good_words
             .find_entry(self.hasher.hash_one(word), |bytes| {
@@ -1144,25 +1168,30 @@ impl Dictionary {
     fn add_user_words_to_suggestions(
         &self,
         typo_word: &[u8],
-        scored: &mut HashMap<Vec<u8>, i32>,
+        scored: &mut HashMap<Box<[u8]>, i32>,
         max_score: i32,
     ) {
         for good_word_bytes in self.user_good_words.iter() {
             let good_word = &self.arena[*good_word_bytes];
 
             // Skip if already in scored (from trie walk)
-            if scored.contains_key(good_word) {
+            let EntryRef::Vacant(entry) = scored.entry_ref(good_word) else {
                 continue;
-            }
+            };
 
             let score = self.edit_distance_score(typo_word, good_word, max_score);
             if score <= max_score {
-                scored.insert(good_word.to_vec(), score);
+                entry.insert(score);
             }
         }
     }
 
-    fn suggest_core(&self, word: &[u8], max_count: usize, max_score: i32) -> HashMap<Vec<u8>, i32> {
+    fn suggest_core(
+        &self,
+        word: &[u8],
+        max_count: usize,
+        max_score: i32,
+    ) -> HashMap<Box<[u8]>, i32> {
         let max_score = max_score.min(SCORE_MAXINIT);
         let mut scored = HashMap::new();
         let word_len = word.len();
@@ -1194,12 +1223,12 @@ impl Dictionary {
     /// (score, altscore, case-insensitive word) matching Neovim's sug_compare.
     fn rescore_and_sort(
         &self,
-        scored: HashMap<Vec<u8>, i32>,
+        scored: HashMap<Box<[u8]>, i32>,
         word: &[u8],
         word_len: usize,
-    ) -> Vec<(Vec<u8>, i32)> {
+    ) -> Vec<(String, i32)> {
         // (word, score, altscore) - altscore is SAL sound score for tie-breaking
-        let mut results: Vec<(Vec<u8>, i32, i32)> =
+        let mut results: Vec<(Box<[u8]>, i32, i32)> =
             scored.into_iter().map(|(w, s)| (w, s, 0)).collect();
 
         if self.sal.is_some() {
@@ -1237,19 +1266,22 @@ impl Dictionary {
                 .then_with(|| a1.cmp(a2))
                 .then_with(|| w1.to_ascii_lowercase().cmp(&w2.to_ascii_lowercase()))
         });
-
-        results.into_iter().map(|(w, s, _)| (w, s)).collect()
+        // todo avoid double UTF-8 verify (sound fold also does this)
+        results
+            .into_iter()
+            .filter_map(|(w, s, _)| Some(({ String::from_utf8(w.into_vec()).ok()? }, s)))
+            .collect()
     }
 
     /// Debug: get full scoring details for all candidates (pre-SAL, SAL, post-SAL).
     /// Returns (word, pre_sal_score, sal_score, final_score) sorted by final score.
     #[cfg(test)]
-    fn suggestions_debug(&self, word: &[u8]) -> Vec<(Vec<u8>, i32, i32, i32)> {
+    fn suggestions_debug(&self, word: &[u8]) -> Vec<(Box<[u8]>, i32, i32, i32)> {
         if word.is_empty() || word.len() > MAXWLEN {
             return Vec::new();
         }
 
-        let mut scored: HashMap<Vec<u8>, i32> = HashMap::new();
+        let mut scored: HashMap<Box<[u8]>, i32> = HashMap::new();
         let word_len = word.len();
 
         let mut fword = Query {
@@ -1272,7 +1304,7 @@ impl Dictionary {
         );
 
         // (word, pre_sal, sal_score, final_score)
-        let mut results: Vec<(Vec<u8>, i32, i32, i32)> =
+        let mut results: Vec<(_, i32, i32, i32)> =
             scored.into_iter().map(|(w, s)| (w, s, 0, s)).collect();
 
         if self.sal.is_some() {
@@ -1307,14 +1339,6 @@ impl Dictionary {
         });
 
         results
-    }
-
-    /// Checks if a single word is spelled correctly.
-    pub fn check_word(&self, word: &[u8]) -> bool {
-        matches!(
-            self.check_word_internal(word),
-            WordResult::Valid | WordResult::ValidRare
-        )
     }
 
     fn check_word_internal(&self, word: &[u8]) -> WordResult {

@@ -229,27 +229,17 @@ pub fn compare() {
     let dict = load_dict();
     let rust_scored: Vec<_> = NEOVIM_RESULTS
         .iter()
-        .map(|result| dict.suggestions(result.typo.as_bytes(), 25, 350))
+        .map(|result| dict.suggestions(result.typo, 25, 350))
         .collect();
 
     let rust_results: Vec<Vec<&str>> = rust_scored
         .iter()
-        .map(|scored| {
-            scored
-                .iter()
-                .map(|(w, _)| std::str::from_utf8(w).unwrap())
-                .collect()
-        })
+        .map(|scored| scored.iter().map(|(w, _)| w.as_str()).collect())
         .collect();
 
     let rust_score_maps: Vec<std::collections::HashMap<&str, i32>> = rust_scored
         .iter()
-        .map(|scored| {
-            scored
-                .iter()
-                .map(|(w, s)| (std::str::from_utf8(w).unwrap(), *s))
-                .collect()
-        })
+        .map(|scored| scored.iter().map(|(w, s)| (w.as_str(), *s)).collect())
         .collect();
 
     let mut total_missing = 0usize;

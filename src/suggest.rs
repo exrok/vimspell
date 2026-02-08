@@ -95,7 +95,7 @@ const MAX_DEPTH: u8 = 253;
 const SUG_CLEAN_COUNT: usize = 150;
 const SUG_CLEANUP_HEADROOM: usize = 50;
 
-fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
+fn add_suggestion(scored: &mut HashMap<Box<[u8]>, i32>, word: &[u8], score: i32) {
     match scored.entry_ref(word) {
         hashbrown::hash_map::EntryRef::Occupied(mut occupied_entry) => {
             let existing_score = occupied_entry.get_mut();
@@ -112,7 +112,7 @@ fn add_suggestion(scored: &mut HashMap<Vec<u8>, i32>, word: &[u8], score: i32) {
 /// Reduce maxscore when too many suggestions have accumulated, matching
 /// Neovim's cleanup_suggestions() behavior. Returns the new maxscore.
 fn cleanup_suggestions(
-    scored: &mut HashMap<Vec<u8>, i32>,
+    scored: &mut HashMap<Box<[u8]>, i32>,
     maxscore: i32,
     clean_count: usize,
 ) -> i32 {
@@ -368,15 +368,14 @@ pub(crate) fn suggest_trie_walk(
     dict: &Dictionary,
     query: &mut Query,
     initial_query_len: u8,
-    scored: &mut HashMap<Vec<u8>, i32>,
+    scored: &mut HashMap<Box<[u8]>, i32>,
     maxscore: i32,
     badflags: u8,
-    max_count: usize,
+    _max_count: usize,
 ) {
     if dict.foldtree.node.is_empty() {
         return;
     }
-    let clean_count = max_count.max(SUG_CLEAN_COUNT);
 
     let node: &[u8] = &dict.foldtree.node;
     let meta: &[u32] = &dict.foldtree.meta;
@@ -448,7 +447,7 @@ pub(crate) fn suggest_trie_walk(
 
                 // perf: Might not need null check
                 if cur > len || node[node_head + cur as usize] != 0 {
-                    if depth >= MAX_DEPTH  {
+                    if depth >= MAX_DEPTH {
                         state = State::Final;
                         continue;
                     }
@@ -538,8 +537,8 @@ pub(crate) fn suggest_trie_walk(
                         add_suggestion(scored, &word, total);
                         trace!(suggest depth, &word, total);
 
-                        if scored.len() > clean_count + SUG_CLEANUP_HEADROOM {
-                            max_score = cleanup_suggestions(scored, max_score, clean_count);
+                        if scored.len() > (SUG_CLEAN_COUNT + SUG_CLEANUP_HEADROOM) {
+                            max_score = cleanup_suggestions(scored, max_score, SUG_CLEAN_COUNT);
                         }
                     }
                 }
@@ -555,7 +554,7 @@ pub(crate) fn suggest_trie_walk(
                         extra = dict.score_wordcount_adj(extra, &prefix[..prefix_len], true);
                     }
                     if current.score + extra < max_score {
-                        if depth >= MAX_DEPTH  {
+                        if depth >= MAX_DEPTH {
                             state = State::Final;
                             continue;
                         }
@@ -592,23 +591,21 @@ pub(crate) fn suggest_trie_walk(
                         current.cursor = 1;
 
                         let query_pos = current.query_pos;
-                        if query_pos < query_len
-                            && current.score + SCORE_DEL < max_score {
-                                current.state = state;
+                        if query_pos < query_len && current.score + SCORE_DEL < max_score {
+                            current.state = state;
 
-                                recurse!(SCORE_DEL);
+                            recurse!(SCORE_DEL);
 
-                                current.flags |= TSF_DIDDEL;
-                                current.deleted_query_pos = query_pos;
-                                current.query_pos += 1;
+                            current.flags |= TSF_DIDDEL;
+                            current.deleted_query_pos = query_pos;
+                            current.query_pos += 1;
 
-                                let new_query_pos = current.query_pos;
-                                if new_query_pos < query_len
-                                    && query[new_query_pos] == query[query_pos]
-                                {
-                                    current.score -= SCORE_DEL - SCORE_DELDUP;
-                                }
+                            let new_query_pos = current.query_pos;
+                            if new_query_pos < query_len && query[new_query_pos] == query[query_pos]
+                            {
+                                current.score -= SCORE_DEL - SCORE_DELDUP;
                             }
+                        }
                     } else {
                         state = State::Final;
                     }

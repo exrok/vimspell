@@ -37,20 +37,20 @@ fn test_parse_dictionary() {
 fn test_check_valid_words() {
     let dict = load_dict();
 
-    assert!(dict.check_word(b"hello"));
-    assert!(dict.check_word(b"world"));
-    assert!(dict.check_word(b"the"));
-    assert!(dict.check_word(b"is"));
-    assert!(dict.check_word(b"a"));
+    assert!(dict.check_word("hello"));
+    assert!(dict.check_word("world"));
+    assert!(dict.check_word("the"));
+    assert!(dict.check_word("is"));
+    assert!(dict.check_word("a"));
 }
 
 #[test]
 fn test_check_invalid_words() {
     let dict = load_dict();
 
-    assert!(!dict.check_word(b"asdfgh"));
-    assert!(!dict.check_word(b"xyzabc"));
-    assert!(!dict.check_word(b"sampl"));
+    assert!(!dict.check_word("asdfgh"));
+    assert!(!dict.check_word("xyzabc"));
+    assert!(!dict.check_word("sampl"));
 }
 
 #[test]
@@ -69,10 +69,10 @@ fn test_spell_check_iter() {
 fn test_suggestions() {
     let dict = load_dict();
 
-    let word = b"sampl";
+    let word = "sampl";
     let suggestions = dict.suggestions(word, 25, 350);
 
-    assert!(suggestions.iter().any(|(s, _)| s == b"sample"));
+    assert!(suggestions.iter().any(|(s, _)| s == "sample"));
 }
 
 #[test]
@@ -200,21 +200,21 @@ fn test_compound_info() {
 #[test]
 fn test_prefix_words_in_foldtree() {
     let dict = load_dict();
-    assert!(dict.check_word(b"undo"));
-    assert!(dict.check_word(b"unkind"));
-    assert!(dict.check_word(b"unable"));
-    assert!(dict.check_word(b"unlike"));
-    assert!(dict.check_word(b"rewrite"));
-    assert!(dict.check_word(b"reopen"));
-    assert!(dict.check_word(b"unhappy"));
-    assert!(dict.check_word(b"restart"));
+    assert!(dict.check_word("undo"));
+    assert!(dict.check_word("unkind"));
+    assert!(dict.check_word("unable"));
+    assert!(dict.check_word("unlike"));
+    assert!(dict.check_word("rewrite"));
+    assert!(dict.check_word("reopen"));
+    assert!(dict.check_word("unhappy"));
+    assert!(dict.check_word("restart"));
 }
 
 #[test]
 fn test_prefix_invalid_combos() {
     let dict = load_dict();
-    assert!(!dict.check_word(b"unxyzabc"));
-    assert!(!dict.check_word(b"rexyzabc"));
+    assert!(!dict.check_word("unxyzabc"));
+    assert!(!dict.check_word("rexyzabc"));
 }
 
 fn build_prefix_dict() -> Dictionary {
@@ -306,25 +306,25 @@ fn build_prefix_dict() -> Dictionary {
 #[test]
 fn test_prefix_synthetic_valid() {
     let dict = build_prefix_dict();
-    assert!(dict.check_word(b"unhappy"));
+    assert!(dict.check_word("unhappy"));
 }
 
 #[test]
 fn test_prefix_synthetic_root_valid() {
     let dict = build_prefix_dict();
-    assert!(dict.check_word(b"happy"));
+    assert!(dict.check_word("happy"));
 }
 
 #[test]
 fn test_prefix_synthetic_wrong_prefix() {
     let dict = build_prefix_dict();
-    assert!(!dict.check_word(b"rehappy"));
+    assert!(!dict.check_word("rehappy"));
 }
 
 #[test]
 fn test_prefix_synthetic_nonsense_after_prefix() {
     let dict = build_prefix_dict();
-    assert!(!dict.check_word(b"unxyzabc"));
+    assert!(!dict.check_word("unxyzabc"));
 }
 
 #[test]
@@ -420,12 +420,12 @@ fn test_prefix_synthetic_with_condition() {
     };
 
     // "unok" -> prefix "un" + "ok", "ok" starts with 'o' which is in [ao] -> valid
-    assert!(dict.check_word(b"unok"));
+    assert!(dict.check_word("unok"));
     // "unak" -> prefix "un" + "ak", "ak" starts with 'a' which is in [ao] -> valid
-    assert!(dict.check_word(b"unak"));
+    assert!(dict.check_word("unak"));
     // Direct lookups also work
-    assert!(dict.check_word(b"ok"));
-    assert!(dict.check_word(b"ak"));
+    assert!(dict.check_word("ok"));
+    assert!(dict.check_word("ak"));
 }
 
 #[test]
@@ -476,8 +476,8 @@ fn test_prefix_synthetic_rare_prefix() {
     };
 
     // "ago" -> prefix "a" + "go", rare prefix -> ValidRare
-    assert!(dict.check_word(b"ago"));
-    assert!(dict.check_word(b"go"));
+    assert!(dict.check_word("ago"));
+    assert!(dict.check_word("go"));
 }
 
 #[test]
@@ -582,14 +582,14 @@ fn test_soundalike_score_too_different() {
 fn test_suggestions_with_sal() {
     let dict = load_dict();
     // The existing "sampl" -> "sample" should still work.
-    let word = b"sampl";
+    let word = "sampl";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"sample"),
+        suggestions.iter().any(|(s, _)| s == "sample"),
         "should suggest 'sample' for 'sampl', got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -661,14 +661,14 @@ fn test_rep_suggestions() {
         user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let word = b"fone";
+    let word = "fone";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"phone"),
+        suggestions.iter().any(|(s, _)| s == "phone"),
         "should suggest 'phone' for 'fone' via REP rule f->ph, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -727,16 +727,16 @@ fn test_rep_score_is_low() {
         user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let word = b"fase";
+    let word = "fase";
     let suggestions = dict.suggestions(word, 25, 350);
     // "phase" should come before "phast" since "fase" -> REP "f"->"ph" -> "phase" is exact,
     // while "phast" requires both REP + substitution.
     assert!(
-        !suggestions.is_empty() && suggestions[0].0 == b"phase",
+        !suggestions.is_empty() && suggestions[0].0 == "phase",
         "REP match 'phase' should be ranked first for 'fase', got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -831,23 +831,23 @@ fn test_region_filtering_synthetic() {
     };
 
     // With REGION_ALL (default), both words are valid.
-    assert!(dict.check_word(b"color"));
-    assert!(dict.check_word(b"colour"));
+    assert!(dict.check_word("color"));
+    assert!(dict.check_word("colour"));
 
     // Set region to "gb" (bit 1) — "colour" should be valid, "color" still valid (no region flag).
     dict.set_region(b"gb");
-    assert!(dict.check_word(b"color"));
-    assert!(dict.check_word(b"colour"));
+    assert!(dict.check_word("color"));
+    assert!(dict.check_word("colour"));
 
     // Set region to "us" (bit 0) — "colour" should be rejected (region mismatch).
     dict.set_region(b"us");
-    assert!(dict.check_word(b"color"));
-    assert!(!dict.check_word(b"colour"));
+    assert!(dict.check_word("color"));
+    assert!(!dict.check_word("colour"));
 
     // Clear region — both valid again.
     dict.clear_region();
-    assert!(dict.check_word(b"color"));
-    assert!(dict.check_word(b"colour"));
+    assert!(dict.check_word("color"));
+    assert!(dict.check_word("colour"));
 }
 
 #[test]
@@ -892,15 +892,15 @@ fn test_region_wrong_region_result() {
     };
 
     // REGION_ALL: valid
-    assert!(dict.check_word(b"grey"));
+    assert!(dict.check_word("grey"));
 
     // Set to "gb" (bit 1): matches region mask 0x02 → valid
     dict.set_region(b"gb");
-    assert!(dict.check_word(b"grey"));
+    assert!(dict.check_word("grey"));
 
     // Set to "us" (bit 0): doesn't match 0x02 → wrong region → check_word returns false
     dict.set_region(b"us");
-    assert!(!dict.check_word(b"grey"));
+    assert!(!dict.check_word("grey"));
 
     // But the word still exists — check_word_internal should return WrongRegion, not NotFound
     assert_eq!(dict.check_word_internal(b"grey"), WordResult::WrongRegion);
@@ -912,7 +912,7 @@ fn test_region_set_unknown() {
     // Setting an unknown region should fall back to REGION_ALL.
     dict.set_region(b"zz");
     // All normal words should still be valid.
-    assert!(dict.check_word(b"hello"));
+    assert!(dict.check_word("hello"));
 }
 
 #[test]
@@ -967,19 +967,19 @@ fn test_region_suggestions_penalty() {
     };
 
     // With REGION_ALL, both should be suggested.
-    let word = b"gry";
+    let word = "gry";
     let suggestions = dict.suggestions(word, 25, 350);
-    assert!(suggestions.iter().any(|(s, _)| s == b"gray"));
-    assert!(suggestions.iter().any(|(s, _)| s == b"grey"));
+    assert!(suggestions.iter().any(|(s, _)| s == "gray"));
+    assert!(suggestions.iter().any(|(s, _)| s == "grey"));
 
     // With region "us", "grey" should still appear but "gray" should rank first.
     dict.set_region(b"us");
     let suggestions = dict.suggestions(word, 25, 350);
-    assert!(suggestions.iter().any(|(s, _)| s == b"gray"));
-    assert!(suggestions.iter().any(|(s, _)| s == b"grey"));
+    assert!(suggestions.iter().any(|(s, _)| s == "gray"));
+    assert!(suggestions.iter().any(|(s, _)| s == "grey"));
     // "gray" should be first (no region penalty) vs "grey" (SCORE_REGION penalty).
-    let gray_pos = suggestions.iter().position(|(s, _)| s == b"gray").unwrap();
-    let grey_pos = suggestions.iter().position(|(s, _)| s == b"grey").unwrap();
+    let gray_pos = suggestions.iter().position(|(s, _)| s == "gray").unwrap();
+    let grey_pos = suggestions.iter().position(|(s, _)| s == "grey").unwrap();
     assert!(
         gray_pos < grey_pos,
         "gray (no region penalty) should rank before grey (wrong region), \
@@ -1104,14 +1104,14 @@ fn test_map_similar_substitution_score() {
         user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let word = b"car";
+    let word = "car";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"cat"),
+        suggestions.iter().any(|(s, _)| s == "cat"),
         "should suggest 'cat' for 'car' when r/t are similar, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1203,17 +1203,17 @@ fn test_common_words_suggestion_boost() {
         user_banned_words: hashbrown::HashTable::new(),
     };
 
-    let word = b"bxt";
+    let word = "bxt";
     let suggestions = dict.suggestions(word, 25, 350);
 
-    let bat_pos = suggestions.iter().position(|(s, _)| s == b"bat");
-    let bet_pos = suggestions.iter().position(|(s, _)| s == b"bet");
+    let bat_pos = suggestions.iter().position(|(s, _)| s == "bat");
+    let bet_pos = suggestions.iter().position(|(s, _)| s == "bet");
     assert!(
         bat_pos.is_some() && bet_pos.is_some(),
         "both 'bat' and 'bet' should be suggested, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
     assert!(
@@ -1281,14 +1281,14 @@ fn test_score_wordcount_adj_thresholds() {
 #[test]
 fn test_suggest_swap() {
     let dict = load_dict();
-    let word = b"hte";
+    let word = "hte";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"the"),
+        suggestions.iter().any(|(s, _)| s == "the"),
         "should suggest 'the' for 'hte' via swap, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1296,14 +1296,14 @@ fn test_suggest_swap() {
 #[test]
 fn test_suggest_multi_edit() {
     let dict = load_dict();
-    let word = b"teh";
+    let word = "teh";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"the"),
+        suggestions.iter().any(|(s, _)| s == "the"),
         "should suggest 'the' for 'teh' via multi-edit, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1311,14 +1311,14 @@ fn test_suggest_multi_edit() {
 #[test]
 fn test_suggest_word_split() {
     let dict = load_dict();
-    let word = b"inthe";
+    let word = "inthe";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"in the"),
+        suggestions.iter().any(|(s, _)| s == "in the"),
         "should suggest 'in the' for 'inthe' via split, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1326,14 +1326,14 @@ fn test_suggest_word_split() {
 #[test]
 fn test_suggest_deletion() {
     let dict = load_dict();
-    let word = b"helllo";
+    let word = "helllo";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"hello"),
+        suggestions.iter().any(|(s, _)| s == "hello"),
         "should suggest 'hello' for 'helllo' via deletion, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1341,14 +1341,14 @@ fn test_suggest_deletion() {
 #[test]
 fn test_suggest_insertion() {
     let dict = load_dict();
-    let word = b"helo";
+    let word = "helo";
     let suggestions = dict.suggestions(word, 25, 350);
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"hello"),
+        suggestions.iter().any(|(s, _)| s == "hello"),
         "should suggest 'hello' for 'helo' via insertion, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1426,13 +1426,13 @@ fn test_user_dict_add_good_word() {
     let mut dict = load_dict();
 
     // Verify "xyzabc" is not in dictionary
-    assert!(!dict.check_word(b"xyzabc"));
+    assert!(!dict.check_word("xyzabc"));
 
     // Add it as a good word
-    dict.accept_word(b"xyzabc");
+    dict.accept_word("xyzabc");
 
     // Now it should be valid
-    assert!(dict.check_word(b"xyzabc"));
+    assert!(dict.check_word("xyzabc"));
 }
 
 #[test]
@@ -1440,13 +1440,13 @@ fn test_user_dict_ban_word() {
     let mut dict = load_dict();
 
     // "hello" is in the dictionary
-    assert!(dict.check_word(b"hello"));
+    assert!(dict.check_word("hello"));
 
     // Ban it
-    dict.ban_word(b"hello");
+    dict.ban_word("hello");
 
     // Now it should fail
-    assert!(!dict.check_word(b"hello"));
+    assert!(!dict.check_word("hello"));
 }
 
 #[test]
@@ -1454,14 +1454,14 @@ fn test_user_dict_remove_word() {
     let mut dict = load_dict();
 
     // Add a good word
-    dict.accept_word(b"testword");
-    assert!(dict.check_word(b"testword"));
+    dict.accept_word("testword");
+    assert!(dict.check_word("testword"));
 
     // Remove it
-    dict.remove_user_word(b"testword");
+    dict.remove_user_word("testword");
 
     // Should not be valid anymore
-    assert!(!dict.check_word(b"testword"));
+    assert!(!dict.check_word("testword"));
 }
 
 #[test]
@@ -1469,12 +1469,12 @@ fn test_user_dict_good_overrides_banned() {
     let mut dict = load_dict();
 
     // Ban a word
-    dict.ban_word(b"testword");
-    assert!(!dict.check_word(b"testword"));
+    dict.ban_word("testword");
+    assert!(!dict.check_word("testword"));
 
     // Add as good (should override banned)
-    dict.accept_word(b"testword");
-    assert!(dict.check_word(b"testword"));
+    dict.accept_word("testword");
+    assert!(dict.check_word("testword"));
 }
 
 #[test]
@@ -1482,12 +1482,12 @@ fn test_user_dict_banned_overrides_good() {
     let mut dict = load_dict();
 
     // Add as good
-    dict.accept_word(b"testword");
-    assert!(dict.check_word(b"testword"));
+    dict.accept_word("testword");
+    assert!(dict.check_word("testword"));
 
     // Ban it (should override good)
-    dict.ban_word(b"testword");
-    assert!(!dict.check_word(b"testword"));
+    dict.ban_word("testword");
+    assert!(!dict.check_word("testword"));
 }
 
 #[test]
@@ -1495,7 +1495,7 @@ fn test_user_dict_spell_check_iter() {
     let mut dict = load_dict();
 
     // Add "sampl" as a good word
-    dict.accept_word(b"sampl");
+    dict.accept_word("sampl");
 
     // "sampl" should no longer be detected as a typo
     let input = b"This is a sampl text with no typos";
@@ -1513,7 +1513,7 @@ fn test_user_dict_banned_in_spell_check() {
     let mut dict = load_dict();
 
     // Ban a valid word
-    dict.ban_word(b"hello");
+    dict.ban_word("hello");
 
     let input = b"hello world";
     let typos: Vec<_> = dict.spell_check(input).collect();
@@ -1528,18 +1528,18 @@ fn test_user_dict_in_suggestions() {
     let mut dict = load_dict();
 
     // Add a custom word that's close to a typo
-    dict.accept_word(b"samply");
+    dict.accept_word("samply");
 
-    let word = b"sampl";
+    let word = "sampl";
     let suggestions = dict.suggestions(word, 25, 350);
 
     // "samply" should appear in suggestions
     assert!(
-        suggestions.iter().any(|(s, _)| s == b"samply"),
+        suggestions.iter().any(|(s, _)| s == "samply"),
         "User word 'samply' should appear in suggestions, got {:?}",
         suggestions
             .iter()
-            .map(|(s, _)| String::from_utf8_lossy(s).to_string())
+            .map(|(s, _)| s.to_string())
             .collect::<Vec<_>>()
     );
 }
@@ -1549,21 +1549,21 @@ fn test_user_dict_clear() {
     let mut dict = load_dict();
 
     // Add some words
-    dict.accept_word(b"word1");
-    dict.ban_word(b"word2");
+    dict.accept_word("word1");
+    dict.ban_word("word2");
 
     // Verify they work
-    assert!(dict.check_word(b"word1"));
-    assert!(!dict.check_word(b"word2"));
+    assert!(dict.check_word("word1"));
+    assert!(!dict.check_word("word2"));
 
     // Remove both words
-    dict.remove_user_word(b"word1");
-    dict.remove_user_word(b"word2");
+    dict.remove_user_word("word1");
+    dict.remove_user_word("word2");
 
     // word1 should now be invalid again
-    assert!(!dict.check_word(b"word1"));
+    assert!(!dict.check_word("word1"));
     // word2 should be valid again (it's in the main dictionary)
-    assert!(dict.check_word(b"world"));
+    assert!(dict.check_word("world"));
 }
 
 #[test]
@@ -1571,10 +1571,10 @@ fn test_user_dict_case_sensitive() {
     let mut dict = load_dict();
 
     // Add lowercase version
-    dict.accept_word(b"myword");
+    dict.accept_word("myword");
 
     // Lowercase should be valid
-    assert!(dict.check_word(b"myword"));
+    assert!(dict.check_word("myword"));
 
     // Uppercase should still use regular dictionary rules
     // (might be valid with ONECAP flag depending on charflags)
@@ -1585,10 +1585,10 @@ fn test_user_dict_banned_has_priority() {
     let mut dict = load_dict();
 
     // Ban a word that exists in the dictionary
-    dict.ban_word(b"world");
+    dict.ban_word("world");
 
     // Should fail even though it's in the main dictionary
-    assert!(!dict.check_word(b"world"));
+    assert!(!dict.check_word("world"));
 
     // Should be detected as a typo in spell check
     let input = b"hello world";

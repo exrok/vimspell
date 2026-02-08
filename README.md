@@ -27,20 +27,19 @@ let bytes = std::fs::read("en.utf-8.spl").unwrap();
 let dict = Dictionary::parse(&bytes).unwrap();
 
 // Check a word
-if dict.check_word(b"hello") {
+if dict.check_word("hello") {
     println!("Correct!");
 }
 
 // Get suggestions for typos (top 25, max score 350)
-let suggestions = dict.suggestions(b"speling", 25, 350);
-for (word, score) in &suggestions {
-    println!("{}: {}", word.escape_ascii(), score);
+for (word, score) in dict.suggestions("speling", 25, 350) {
+    println!("{}: {}", word, score);
 }
 
 // Scan a document
-let text = b"This is a sampel text with mistakse.";
+let text = "This is a sampel text with mistakse.";
 for range in dict.spell_check(text) {
-    println!("Typo at {}: {}", range.start, String::from_utf8_lossy(&text[range]));
+    println!("Typo: {}", &text[range]);
 }
 ```
 
@@ -67,12 +66,12 @@ Or create your own with Neovim's `:mkspell` command.
 let mut dict = Dictionary::parse(&bytes).unwrap();
 
 // Add technical terms
-dict.accept_word(b"rustdoc");
-dict.accept_word(b"async");
+dict.accept_word("rustdoc");
+dict.accept_word("async");
 
 // Ban common mistakes
-dict.ban_word(b"alot");
-dict.ban_word(b"irregardless");
+dict.ban_word("alot");
+dict.ban_word("irregardless");
 ```
 
 ### Regional Preferences
@@ -92,13 +91,13 @@ dict.clear_region();
 
 ```rust
 // Fewer results with a tighter score threshold for speed
-let fast = dict.suggestions(b"recieve", 5, 200);
+let fast = dict.suggestions("recieve", 5, 200);
 
 // More results with a looser threshold
-let thorough = dict.suggestions(b"recieve", 25, 350);
+let thorough = dict.suggestions("recieve", 25, 350);
 
 for (word, score) in &thorough {
-    println!("{}: {}", word.escape_ascii(), score);
+    println!("{}: {}", word, score);
 }
 ```
 
