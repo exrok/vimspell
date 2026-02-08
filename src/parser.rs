@@ -21,6 +21,16 @@ macro_rules! bail {
     };
 }
 
+// Avoid try operator to reduce compile time from trait and codegen overhead.
+macro_rules! rtry {
+    ($($tt:tt)*) => {
+        match $($tt)* {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+}
+
 struct SpellReader<'a> {
     data: &'a [u8],
 }
@@ -104,12 +114,12 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let mut r = SpellReader::new(contents);
     let mut a = Arena::default();
 
-    let magic = r.read_exact(8)?;
+    let magic = rtry!(r.read_exact(8));
     if magic != VIMSPELLMAGIC {
         bail!(InvalidMagic)
     }
 
-    let version = r.read_u8()?;
+    let version = rtry!(r.read_u8());
     if version != VIMSPELLVERSION {
         bail!(UnsupportedVersion)
     }
@@ -135,33 +145,33 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
     let mut common_words = CommonWords::new();
 
     loop {
-        let section_id = r.read_u8()?;
+        let section_id = rtry!(r.read_u8());
         if section_id == SN_END {
             break;
         }
 
-        let flags = r.read_u8()?;
-        let len = r.read_u32_be()? as usize;
+        let flags = rtry!(r.read_u8());
+        let len = rtry!(r.read_u32_be()) as usize;
 
         match section_id {
             SN_REGION => {
-                let data = r.read_exact(len)?;
+                let data = rtry!(r.read_exact(len));
                 for chunk in data.chunks_exact(2) {
                     regions.push([chunk[0], chunk[1]]);
                 }
             }
             SN_CHARFLAGS => {
-                read_charflags(&mut r, len, &mut charflags)?;
+                rtry!(read_charflags(&mut r, len, &mut charflags));
             }
             SN_MIDWORD => {
-                let data = r.read_exact(len)?;
+                let data = rtry!(r.read_exact(len));
                 midword = a.alloc(data);
             }
             SN_PREFCOND => {
-                prefcond = read_prefcond(&mut r, &mut a, len)?;
+                prefcond = rtry!(read_prefcond(&mut r, &mut a, len));
             }
             SN_COMPOUND => {
-                read_compound(
+                rtry!(read_compound(
                     &mut r,
                     &mut a,
                     len,
@@ -171,42 +181,54 @@ pub fn parse(contents: &[u8]) -> Result<Dictionary, ParseError> {
                     &mut comp_options,
                     &mut comp_rules,
                     &mut comp_patterns,
-                )?;
+                ));
             }
             SN_SYLLABLE => {
-                read_syllable(&mut r, &mut a, len, &mut syllable)?;
+                rtry!(read_syllable(&mut r, &mut a, len, &mut syllable));
             }
             SN_REP => {
-                read_rep_section(&mut r, &mut a, len, &mut rep, &mut rep_first)?;
+                rtry!(read_rep_section(
+                    &mut r,
+                    &mut a,
+                    len,
+                    &mut rep,
+                    &mut rep_first
+                ));
             }
             SN_SAL => {
-                sal = Some(read_sal_section(&mut r, len)?);
+                sal = Some(rtry!(read_sal_section(&mut r, len)));
             }
             SN_MAP => {
-                map = Some(read_map_section(&mut r, len)?);
+                map = Some(rtry!(read_map_section(&mut r, len)));
             }
             SN_REPSAL => {
-                read_rep_section(&mut r, &mut a, len, &mut repsal, &mut repsal_first)?;
+                rtry!(read_rep_section(
+                    &mut r,
+                    &mut a,
+                    len,
+                    &mut repsal,
+                    &mut repsal_first
+                ));
             }
             SN_NOBREAK => {
                 nobreak = true;
-                r.skip(len)?;
+                rtry!(r.skip(len));
             }
             SN_WORDS => {
-                read_words_section(&mut r, &mut a, len, &mut common_words)?;
+                rtry!(read_words_section(&mut r, &mut a, len, &mut common_words));
             }
             _ => {
                 if flags & SNF_REQUIRED != 0 {
                     bail!(UnknownRequiredSection)
                 }
-                r.skip(len)?;
+                rtry!(r.skip(len));
             }
         }
     }
 
-    let foldtree = read_wordtree(&mut r, false)?;
-    let keeptree = read_wordtree(&mut r, false)?;
-    let prefixtree = read_wordtree(&mut r, true)?;
+    let foldtree = rtry!(read_wordtree(&mut r, false));
+    let keeptree = rtry!(read_wordtree(&mut r, false));
+    let prefixtree = rtry!(read_wordtree(&mut r, true));
 
     if !midword.is_empty() {
         charflags.apply_midword(&a[midword]);
@@ -247,10 +269,10 @@ fn read_charflags(r: &mut SpellReader, len: usize, cf: &mut CharFlags) -> Result
         return Ok(());
     }
 
-    let charflagslen = r.read_u8()? as usize;
+    let charflagslen = rtry!(r.read_u8()) as usize;
 
     if charflagslen > 0 {
-        let flags_data = r.read_exact(charflagslen)?;
+        let flags_data = rtry!(r.read_exact(charflagslen));
 
         for (i, &flag) in flags_data.iter().enumerate() {
             let idx = 128 + i;
@@ -263,16 +285,16 @@ fn read_charflags(r: &mut SpellReader, len: usize, cf: &mut CharFlags) -> Result
     let remaining = len - 1 - charflagslen;
     if remaining < 2 {
         if remaining > 0 {
-            r.skip(remaining)?;
+            rtry!(r.skip(remaining));
         }
         return Ok(());
     }
 
-    let folcharslen = r.read_u16_be()? as usize;
+    let folcharslen = rtry!(r.read_u16_be()) as usize;
     let to_read = folcharslen.min(remaining - 2);
 
     if to_read > 0 {
-        let folchars = r.read_exact(to_read)?;
+        let folchars = rtry!(r.read_exact(to_read));
 
         let mut char_idx = 128usize;
         let mut i = 0;
@@ -298,7 +320,7 @@ fn read_charflags(r: &mut SpellReader, len: usize, cf: &mut CharFlags) -> Result
 
         let extra = (remaining - 2).saturating_sub(to_read);
         if extra > 0 {
-            r.skip(extra)?;
+            rtry!(r.skip(extra));
         }
     }
 
@@ -307,11 +329,11 @@ fn read_charflags(r: &mut SpellReader, len: usize, cf: &mut CharFlags) -> Result
 
 fn read_prefcond(r: &mut SpellReader, a: &mut Arena, len: usize) -> Result<Vec<Bytes>, ParseError> {
     if len < 2 {
-        r.skip(len)?;
+        rtry!(r.skip(len));
         return Ok(Vec::new());
     }
 
-    let count = r.read_u16_be()? as usize;
+    let count = rtry!(r.read_u16_be()) as usize;
     let mut conditions = Vec::with_capacity(count);
     let mut bytes_read = 2;
 
@@ -319,11 +341,11 @@ fn read_prefcond(r: &mut SpellReader, a: &mut Arena, len: usize) -> Result<Vec<B
         if bytes_read >= len {
             break;
         }
-        let cond_len = r.read_u8()? as usize;
+        let cond_len = rtry!(r.read_u8()) as usize;
         bytes_read += 1;
 
         let cond = if cond_len > 0 {
-            let data = r.read_exact(cond_len)?;
+            let data = rtry!(r.read_exact(cond_len));
             bytes_read += cond_len;
             a.alloc(data)
         } else {
@@ -334,7 +356,7 @@ fn read_prefcond(r: &mut SpellReader, a: &mut Arena, len: usize) -> Result<Vec<B
 
     let remaining = len.saturating_sub(bytes_read);
     if remaining > 0 {
-        r.skip(remaining)?;
+        rtry!(r.skip(remaining));
     }
 
     Ok(conditions)
@@ -353,17 +375,17 @@ fn read_compound(
     comp_patterns: &mut Vec<(Bytes, Bytes)>,
 ) -> Result<(), ParseError> {
     if len < 2 {
-        r.skip(len)?;
+        rtry!(r.skip(len));
         return Ok(());
     }
 
     let mut todo = len;
 
-    let c = r.read_u8()?;
+    let c = rtry!(r.read_u8());
     todo -= 1;
     *comp_max = if c < 2 { MAXWLEN as u8 } else { c };
 
-    let c = r.read_u8()?;
+    let c = rtry!(r.read_u8());
     todo -= 1;
     *comp_minlen = if c < 1 { 0 } else { c };
 
@@ -371,7 +393,7 @@ fn read_compound(
         return Ok(());
     }
 
-    let c = r.read_u8()?;
+    let c = rtry!(r.read_u8());
     todo -= 1;
     *comp_sylmax = if c < 1 { MAXWLEN as u8 } else { c };
 
@@ -379,7 +401,7 @@ fn read_compound(
         return Ok(());
     }
 
-    let first = r.read_u8()?;
+    let first = rtry!(r.read_u8());
     if first != 0 {
         todo -= 1;
         comp_rules.all_flags.push(first);
@@ -389,29 +411,29 @@ fn read_compound(
         if todo == 0 {
             return Ok(());
         }
-        let opts = r.read_u8()?;
+        let opts = rtry!(r.read_u8());
         todo -= 1;
         *comp_options = opts;
 
         if todo < 2 {
-            r.skip(todo)?;
+            rtry!(r.skip(todo));
             return Ok(());
         }
 
-        let pat_count = r.read_u16_be()? as usize;
+        let pat_count = rtry!(r.read_u16_be()) as usize;
         todo -= 2;
 
         for _ in 0..pat_count {
             if todo == 0 {
                 break;
             }
-            let pat_len = r.read_u8()? as usize;
+            let pat_len = rtry!(r.read_u8()) as usize;
             todo -= 1;
             if pat_len == 0 || todo < pat_len {
-                r.skip(todo)?;
+                rtry!(r.skip(todo));
                 return Ok(());
             }
-            let pat = r.read_exact(pat_len)?;
+            let pat = rtry!(r.read_exact(pat_len));
             todo -= pat_len;
 
             let split_pos = pat.iter().position(|&b| b == b'/');
@@ -431,7 +453,7 @@ fn read_compound(
     let mut in_bracket = false;
     let mut current_rule = Vec::new();
 
-    let flags_data = r.read_exact(todo)?;
+    let flags_data = rtry!(r.read_exact(todo));
     for &c in flags_data {
         let is_special = matches!(c, b'?' | b'*' | b'+' | b'[' | b']' | b'/');
 
@@ -489,7 +511,7 @@ fn read_syllable(
         return Ok(());
     }
 
-    let data = r.read_exact(len)?;
+    let data = rtry!(r.read_exact(len));
     let mut parts = data.split(|&b| b == b'/');
 
     if let Some(chars) = parts.next() {
@@ -515,18 +537,18 @@ fn read_rep_section(
     first: &mut [i16; 256],
 ) -> Result<(), ParseError> {
     if len < 2 {
-        r.skip(len)?;
+        rtry!(r.skip(len));
         return Ok(());
     }
 
-    let count = r.read_u16_be()? as usize;
+    let count = rtry!(r.read_u16_be()) as usize;
 
     items.reserve(count);
     for _ in 0..count {
-        let from_len = r.read_u8()? as usize;
-        let from_data = r.read_exact(from_len)?;
-        let to_len = r.read_u8()? as usize;
-        let to_data = r.read_exact(to_len)?;
+        let from_len = rtry!(r.read_u8()) as usize;
+        let from_data = rtry!(r.read_exact(from_len));
+        let to_len = rtry!(r.read_u8()) as usize;
+        let to_data = rtry!(r.read_exact(to_len));
         items.push(RepItem {
             from: a.alloc(from_data),
             to: a.alloc(to_data),
@@ -555,7 +577,7 @@ fn read_words_section(
     if len == 0 {
         return Ok(());
     }
-    let data = r.read_exact(len)?;
+    let data = rtry!(r.read_exact(len));
 
     let word_count = data.iter().filter(|&&b| b == 0).count();
     *words = CommonWords::with_capacity(word_count);
@@ -584,7 +606,7 @@ fn read_map_section(r: &mut SpellReader, len: usize) -> Result<MapInfo, ParseErr
         });
     }
 
-    let data = r.read_exact(len)?;
+    let data = rtry!(r.read_exact(len));
     let Ok(map_str) = std::str::from_utf8(data) else {
         bail!(UnknownRequiredSection)
     };
@@ -614,20 +636,20 @@ fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseErr
         bail!(UnexpectedEof)
     }
 
-    let salflags = r.read_u8()?;
+    let salflags = rtry!(r.read_u8());
     let followup = salflags & SAL_F0LLOWUP != 0;
     let collapse = salflags & SAL_COLLAPSE != 0;
     let rem_accents = salflags & SAL_REM_ACCENTS != 0;
 
-    let salcount = r.read_u16_be()? as usize;
+    let salcount = rtry!(r.read_u16_be()) as usize;
 
     let mut items = Vec::with_capacity(salcount + 1);
 
     for _ in 0..salcount {
-        let fromlen = r.read_u8()? as usize;
-        let from = r.read_exact(fromlen)?;
-        let tolen = r.read_u8()? as usize;
-        let to_bytes = r.read_exact(tolen)?;
+        let fromlen = rtry!(r.read_u8()) as usize;
+        let from = rtry!(r.read_exact(fromlen));
+        let tolen = rtry!(r.read_u8()) as usize;
+        let to_bytes = rtry!(r.read_exact(tolen));
 
         // Parse the "from" pattern into lead, oneof, rules.
         let mut lead = Vec::new();
@@ -717,7 +739,7 @@ fn read_sal_section(r: &mut SpellReader, len: usize) -> Result<SalInfo, ParseErr
 }
 
 fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, ParseError> {
-    let node_count = r.read_u32_be()? as usize;
+    let node_count = rtry!(r.read_u32_be()) as usize;
 
     if node_count == 0 {
         return Ok(WordTree::new());
@@ -726,27 +748,17 @@ fn read_wordtree(r: &mut SpellReader, prefixtree: bool) -> Result<WordTree, Pars
     let mut node = vec![0u8; node_count];
     let mut meta = vec![0u32; node_count];
     if prefixtree {
-        read_tree_node_prefixtree(r, &mut node, &mut meta, node_count, 0)?;
+        rtry!(read_tree_node_prefixtree(
+            r, &mut node, &mut meta, node_count, 0
+        ));
     } else {
-        read_tree_node(r, &mut node, &mut meta, node_count, 0)?;
+        rtry!(read_tree_node(r, &mut node, &mut meta, node_count, 0));
     }
 
-    Ok(WordTree {
-        node,
-        meta,
-    })
+    Ok(WordTree { node, meta })
 }
 
 const SHARED_MASK: u32 = 0x8000000;
-
-macro_rules! rtry {
-    ($($tt:tt)*) => {
-        match $($tt)* {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        }
-    };
-}
 
 fn read_tree_node(
     r: &mut SpellReader,
@@ -796,7 +808,7 @@ fn read_tree_node(
             }
             meta[idx] = flags;
         } else {
-            let mut flags = r.read_u16_le()? as u32;
+            let mut flags = rtry!(r.read_u16_le()) as u32;
             if flags & (WF_REGION as u32) != 0 {
                 flags |= (rtry!(r.read_u8()) as u32) << 16;
             }
@@ -832,7 +844,7 @@ fn read_tree_node(
             }
             meta[idx] = flags;
         } else {
-            let mut flags = r.read_u16_le()? as u32;
+            let mut flags = rtry!(r.read_u16_le()) as u32;
             if flags & (WF_REGION as u32) != 0 {
                 flags |= (rtry!(r.read_u8()) as u32) << 16;
             }
@@ -866,7 +878,7 @@ fn read_tree_node_prefixtree(
 ) -> Result<usize, ParseError> {
     let mut idx = startidx;
 
-    let len = r.read_u8()? as usize;
+    let len = rtry!(r.read_u8()) as usize;
     if len == 0 {
         bail!(InvalidSiblingCount)
     }
@@ -879,25 +891,25 @@ fn read_tree_node_prefixtree(
     idx += 1;
 
     for _ in 0..len {
-        let c = r.read_u8()?;
+        let c = rtry!(r.read_u8());
 
         if c <= BY_SPECIAL {
             if c == BY_INDEX {
-                let n = r.read_u24_be()?;
+                let n = rtry!(r.read_u24_be());
                 if n as usize >= maxidx {
                     bail!(InvalidSharedIndex)
                 }
                 meta[idx] = n | SHARED_MASK;
-                let xbyte = r.read_u8()?;
+                let xbyte = rtry!(r.read_u8());
                 node[idx] = xbyte;
             } else {
                 let pflags = if c == BY_FLAGS {
-                    (r.read_u8()? as u32) << 24
+                    (rtry!(r.read_u8()) as u32) << 24
                 } else {
                     0
                 };
-                let affix_id = r.read_u8()? as u32;
-                let prefcondnr = r.read_u16_be()? as u32;
+                let affix_id = rtry!(r.read_u8()) as u32;
+                let prefcondnr = rtry!(r.read_u16_be()) as u32;
                 meta[idx] = pflags | (prefcondnr << 8) | affix_id;
             }
         } else {
@@ -913,7 +925,7 @@ fn read_tree_node_prefixtree(
                 meta[pos] &= !SHARED_MASK;
             } else {
                 meta[pos] = idx as u32;
-                idx = read_tree_node_prefixtree(r, node, meta, maxidx, idx)?;
+                idx = rtry!(read_tree_node_prefixtree(r, node, meta, maxidx, idx));
             }
         }
     }
