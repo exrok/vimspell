@@ -153,16 +153,6 @@ fn similar_chars(map_array: Option<&[u32; 256]>, c1: u8, c2: u8) -> bool {
     } else {
         false
     }
-    // if map_array.is_null() {
-    //     return false;
-    // }
-    // unsafe {
-    //     let m1 = *map_array.add(c1 as usize);
-    //     if m1 == 0 {
-    //         return false;
-    //     }
-    //     m1 == *map_array.add(c2 as usize)
-    // }
 }
 
 /// Check if the suggestion's case is valid given the bad word's case.

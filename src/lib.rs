@@ -71,7 +71,7 @@ mod suggest;
 mod tests;
 
 const VIMSPELLMAGIC: &[u8; 8] = b"VIMspell";
-const VIMSPELLVERSION: u8 = 50;
+const VIMSPELLVERSION: u8 = b'2';
 
 /// Maximum word length in bytes. Matches neovim's MAXWLEN.
 const MAXWLEN: usize = 254;
@@ -801,6 +801,7 @@ impl Dictionary {
     /// let bytes = std::fs::read("en.utf-8.spl").unwrap();
     /// let dict = Dictionary::parse(&bytes).unwrap();
     /// ```
+    #[must_use]
     pub fn parse(content: &[u8]) -> Result<Self, ParseError> {
         parser::parse(content)
     }
@@ -834,6 +835,7 @@ impl Dictionary {
     ///
     /// Recommended max_score values between 200 and 350. Large max_score values
     /// will take longer to compute then smaller ones.
+    #[must_use]
     pub fn suggestions(
         &self,
         word: impl AsRef<[u8]>,
@@ -862,6 +864,7 @@ impl Dictionary {
     }
 
     /// Returns true if a single word is spelled correctly.
+    #[must_use]
     pub fn accepts_word(&self, word: impl AsRef<[u8]>) -> bool {
         matches!(
             self.check_word_internal(word.as_ref()),
@@ -1266,7 +1269,7 @@ impl Dictionary {
                 .then_with(|| a1.cmp(a2))
                 .then_with(|| w1.to_ascii_lowercase().cmp(&w2.to_ascii_lowercase()))
         });
-        // todo avoid double UTF-8 verify (sound fold also does this)
+        // TODO avoid double UTF-8 verify (sound fold also does this)
         results
             .into_iter()
             .filter_map(|(w, s, _)| Some(({ String::from_utf8(w.into_vec()).ok()? }, s)))
