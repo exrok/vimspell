@@ -67,8 +67,8 @@ Or create your own with Neovim's `:mkspell` command.
 let mut dict = Dictionary::parse(&bytes).unwrap();
 
 // Add technical terms
-dict.add_good_word(b"rustdoc");
-dict.add_good_word(b"async");
+dict.accept_word(b"rustdoc");
+dict.accept_word(b"async");
 
 // Ban common mistakes
 dict.ban_word(b"alot");

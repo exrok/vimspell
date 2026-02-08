@@ -216,6 +216,23 @@ pub enum ParseError {
     UnknownRequiredSection,
 }
 
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::UnexpectedEof => "unexpected end of file",
+            Self::InvalidMagic => "invalid VIMspell magic header",
+            Self::UnsupportedVersion => "unsupported spell file version",
+            Self::InvalidSiblingCount => "invalid sibling count in word tree",
+            Self::TreeIndexOverflow => "tree index out of bounds",
+            Self::InvalidSharedIndex => "invalid shared subtree index",
+            Self::UnknownRequiredSection => "unknown required section",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
 struct WordTree {
     node: Vec<u8>,
     meta: Vec<u32>,
