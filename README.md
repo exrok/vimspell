@@ -102,14 +102,14 @@ for (word, score) in &thorough {
 ## Limitations
 
 - Only supports VIMspell format version 2 (the current standard since 2006)
-- Affix rules (prefixes/suffixes) are used for word checking but not for generating
-  suggestions. Languages that rely heavily on affixes may produce fewer suggestion candidates.
-- Compound word validation parses `nobreak`, `CHECKDUP`, `CHECKREP`, `CHECKCASE`, and
-  `CHECKTRIPLE` flags but does not enforce them. Compound checking still works via compound
-  rules and patterns, but these additional constraints are ignored, this doesn't effect
-  english.
-- External sound folding files (SUG) not support, not used by english dictionary anyway.
-- Limited testing on non-English languages.
+- For no english dictionaries:
+  - Affix rules (prefixes/suffixes) are used for word checking but not for generating
+    suggestions. Languages that rely heavily on affixes may produce fewer suggestion candidates.
+  - Compound word validation parses `nobreak`, `CHECKDUP`, `CHECKREP`, `CHECKCASE`, and
+    `CHECKTRIPLE` flags but does not enforce them. Compound checking still works via compound
+    rules and patterns, but these additional constraints are ignored.
+  - External sound folding files (SUG) not support.
+  - Limited testing on non-English languages.
 
 ## Acknowledgments
 
